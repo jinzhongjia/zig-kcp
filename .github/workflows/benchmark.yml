@@ -1,0 +1,57 @@
+name: Benchmark ⚡
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '**.zig'
+      - 'build.zig.zon'
+      - '.github/workflows/benchmark.yml'
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - '**.zig'
+      - 'build.zig.zon'
+      - '.github/workflows/benchmark.yml'
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Test 🧪"]
+    types:
+      - completed
+
+run-name: |
+  ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }} by @${{ github.actor }}
+
+jobs:
+  benchmark:
+    name: Benchmark on ${{ matrix.os }} with Zig ${{ matrix.zig-version }}
+    runs-on: ${{ matrix.os }}
+    if: |
+      github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event_name == 'pull_request'
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        zig-version: [0.13.0, master]
+    steps:
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ matrix.zig-version }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run benchmarks
+        run: zig build bench --summary all
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ matrix.os }}-zig-${{ matrix.zig-version }}
+          path: zig-out/bin/
+          retention-days: 7

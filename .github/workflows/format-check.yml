@@ -1,0 +1,35 @@
+name: Format Check 📝
+
+on:
+  push:
+    branches:
+      - '**'
+    paths:
+      - '**.zig'
+      - '.github/workflows/format-check.yml'
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - '**.zig'
+      - '.github/workflows/format-check.yml'
+  workflow_dispatch:
+
+run-name: |
+  ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }} by @${{ github.actor }}
+
+jobs:
+  format:
+    name: Check Zig code formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Format Check
+        run: zig fmt --check .
