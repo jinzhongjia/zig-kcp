@@ -7,6 +7,7 @@ A Zig implementation of the KCP protocol, based on the original C implementation
 ## Introduction
 
 KCP is a fast and reliable ARQ (Automatic Repeat reQuest) protocol that offers significant advantages over TCP:
+
 - 30-40% average RTT reduction compared to TCP
 - 3x reduction in maximum RTT
 - Lightweight, modular implementation
@@ -54,33 +55,33 @@ fn outputCallback(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    
+
     // 2. Create KCP instance
     const conv: u32 = 0x12345678; // Conversation ID, must be same for both peers
     const kcp_inst = try kcp.create(allocator, conv, null);
     defer kcp.release(kcp_inst);
-    
+
     // 3. Set output callback
     kcp.setOutput(kcp_inst, &outputCallback);
-    
+
     // 4. Configure KCP (optional)
     // Parameters: nodelay, interval, resend, nc
     // Normal mode: setNodelay(0, 40, 0, 0)
     // Fast mode: setNodelay(1, 10, 2, 1)
     kcp.setNodelay(kcp_inst, 1, 10, 2, 1);
-    
+
     // 5. Send data
     const message = "Hello, KCP!";
     _ = try kcp.send(kcp_inst, message);
-    
+
     // 6. Update periodically (e.g., every 10ms)
     const current = @as(u32, @intCast(std.time.milliTimestamp()));
     try kcp.update(kcp_inst, current);
-    
+
     // 7. Call input when receiving underlying packets
     // const data = ...; // Data received from UDP socket
     // _ = try kcp.input(kcp_inst, data);
-    
+
     // 8. Read received data
     var buffer: [1024]u8 = undefined;
     const len = try kcp.recv(kcp_inst, &buffer);
@@ -95,80 +96,104 @@ pub fn main() !void {
 ### Creation and Destruction
 
 #### `create(allocator, conv, user)`
+
 Create a KCP instance
+
 - `allocator`: Memory allocator
 - `conv`: Conversation ID, must be the same for both communicating peers
 - `user`: User-defined data pointer (optional)
 
 #### `release(kcp)`
+
 Release the KCP instance and its resources
 
 ### Configuration Functions
 
 #### `setOutput(kcp, callback)`
+
 Set the output callback function, which KCP uses to send underlying packets
+
 ```zig
 fn callback(buf: []const u8, kcp: *Kcp, user: ?*anyopaque) !i32
 ```
 
 #### `setNodelay(kcp, nodelay, interval, resend, nc)`
+
 Configure KCP working mode
+
 - `nodelay`: 0=disabled (default), 1=enabled
 - `interval`: Internal update interval (milliseconds), default 100ms
 - `resend`: Fast retransmission trigger count, 0=disabled (default)
 - `nc`: 0=normal congestion control (default), 1=disable congestion control
 
 **Recommended configurations:**
+
 - Normal mode: `setNodelay(0, 40, 0, 0)`
 - Fast mode: `setNodelay(1, 20, 2, 1)`
 - Turbo mode: `setNodelay(1, 10, 2, 1)`
 
 #### `setMtu(kcp, mtu)`
+
 Set MTU size, default 1400 bytes
 
 #### `wndsize(kcp, sndwnd, rcvwnd)`
+
 Set send and receive window sizes
+
 - `sndwnd`: Send window, default 32
 - `rcvwnd`: Receive window, default 128
 
 ### Data Transfer
 
 #### `send(kcp, buffer)`
+
 Send data
+
 - Return value: Returns the number of bytes sent on success, negative on error
 
 #### `recv(kcp, buffer)`
+
 Receive data
+
 - Return value: Returns the number of bytes received on success, negative on error
   - `-1`: Receive queue is empty
   - `-2`: Incomplete packet
   - `-3`: Buffer too small
 
 #### `input(kcp, data)`
+
 Input underlying packet data into KCP (e.g., data received from UDP)
 
 ### Update and Check
 
 #### `update(kcp, current)`
+
 Update KCP state, should be called periodically (recommended: 10-100ms)
+
 - `current`: Current timestamp (milliseconds)
 
 #### `check(kcp, current)`
+
 Check when to call update next
+
 - Return value: Timestamp for the next update (milliseconds)
 
 ### Other Functions
 
 #### `flush(kcp)`
+
 Immediately flush pending data
 
 #### `peeksize(kcp)`
+
 Get the size of the next message in the receive queue
 
 #### `waitsnd(kcp)`
+
 Get the number of packets waiting to be sent
 
 #### `getconv(data)`
+
 Extract conversation ID from a packet
 
 ## Build and Test
@@ -247,24 +272,24 @@ KCP is an ARQ (Automatic Repeat reQuest) protocol operating at the application l
 
 ### Test Categories
 
-| Category | Count | Coverage |
-|----------|-------|----------|
-| Basic Functions | 9 | Encode/decode, utilities, create/release |
-| Configuration | 6 | MTU, window, nodelay, stream mode |
-| Error Handling | 5 | Invalid conv, corrupted data, buffer issues |
-| ARQ Mechanisms | 5 | Timeout retransmission, fast retransmission |
-| Fragmentation | 2 | Large data, multi-fragment reassembly |
-| Advanced Features | 3 | Window probe, flush, window full |
-| Fuzz Testing | 3 | Random input, malformed packets, edge values |
-| Stress Testing | 3 | Many small packets, large data, bidirectional |
-| Boundary Testing | 8 | MTU, window, sequence wraparound |
-| Dead Link | 2 | Complete loss, gradual retransmission |
-| Receive Window | 3 | Window full, flow control, zero window |
-| RTT Testing | 2 | RTT calculation, delay variation |
-| Congestion Control | 2 | ssthresh adjustment, slow start |
-| Timestamp | 2 | Wraparound, time jump |
-| Interval | 3 | Update frequency, flush timing |
-| Nodelay Modes | 3 | Normal, fast, comparison |
+| Category           | Count | Coverage                                      |
+| ------------------ | ----- | --------------------------------------------- |
+| Basic Functions    | 9     | Encode/decode, utilities, create/release      |
+| Configuration      | 6     | MTU, window, nodelay, stream mode             |
+| Error Handling     | 5     | Invalid conv, corrupted data, buffer issues   |
+| ARQ Mechanisms     | 5     | Timeout retransmission, fast retransmission   |
+| Fragmentation      | 2     | Large data, multi-fragment reassembly         |
+| Advanced Features  | 3     | Window probe, flush, window full              |
+| Fuzz Testing       | 3     | Random input, malformed packets, edge values  |
+| Stress Testing     | 3     | Many small packets, large data, bidirectional |
+| Boundary Testing   | 8     | MTU, window, sequence wraparound              |
+| Dead Link          | 2     | Complete loss, gradual retransmission         |
+| Receive Window     | 3     | Window full, flow control, zero window        |
+| RTT Testing        | 2     | RTT calculation, delay variation              |
+| Congestion Control | 2     | ssthresh adjustment, slow start               |
+| Timestamp          | 2     | Wraparound, time jump                         |
+| Interval           | 3     | Update frequency, flush timing                |
+| Nodelay Modes      | 3     | Normal, fast, comparison                      |
 
 ## Differences from Original C Implementation
 
@@ -295,4 +320,3 @@ This implementation is based on the original KCP protocol by skywind3000.
 ## References
 
 - [Original KCP Repository](https://github.com/skywind3000/kcp)
-- [KCP Protocol Design](https://github.com/skywind3000/kcp/wiki/KCP-Basic)
