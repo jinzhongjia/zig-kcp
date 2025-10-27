@@ -1,11 +1,13 @@
 .{
-    .name = "zig-kcp",
+    .name = .kcp,
     .version = "0.0.1",
-    .minimum_zig_version = "0.13.0",
+    .fingerprint = 0xa516b48ba14c5a67,
+    .minimum_zig_version = "0.15.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "examples",
     },
 }
