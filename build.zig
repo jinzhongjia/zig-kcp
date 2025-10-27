@@ -38,4 +38,21 @@ pub fn build(b: *std.Build) void {
 
     const run_bench = b.addRunArtifact(bench_exe);
     bench_step.dependOn(&run_bench.step);
+
+    // Performance test (similar to original KCP test.cpp)
+    const perf_step = b.step("perf", "Run performance test with simulated network");
+    const perf_exe = b.addExecutable(.{
+        .name = "perf_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/perf_test.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "kcp", .module = kcp_module },
+            },
+        }),
+    });
+
+    const run_perf = b.addRunArtifact(perf_exe);
+    perf_step.dependOn(&run_perf.step);
 }
