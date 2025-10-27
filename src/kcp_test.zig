@@ -166,8 +166,8 @@ test "kcp send and recv basic" {
     // Final attempt
     var recv_buf: [1024]u8 = undefined;
     const recv_len = try kcp.recv(kcp2, &recv_buf);
-    try testing.expectEqual(@as(i32, @intCast(message.len)), recv_len);
-    try testing.expectEqualStrings(message, recv_buf[0..@as(usize, @intCast(recv_len))]);
+    try testing.expectEqual(message.len, recv_len);
+    try testing.expectEqualStrings(message, recv_buf[0..recv_len]);
 }
 
 test "kcp send large data with fragmentation" {
@@ -239,8 +239,8 @@ test "kcp send large data with fragmentation" {
     // Final attempt to receive
     var recv_buf: [10240]u8 = undefined;
     const recv_len = try kcp.recv(kcp2, &recv_buf);
-    try testing.expectEqual(@as(i32, @intCast(large_data.len)), recv_len);
-    try testing.expectEqualSlices(u8, &large_data, recv_buf[0..@as(usize, @intCast(recv_len))]);
+    try testing.expectEqual(large_data.len, recv_len);
+    try testing.expectEqualSlices(u8, &large_data, recv_buf[0..recv_len]);
 }
 
 test "kcp config functions" {
@@ -253,8 +253,8 @@ test "kcp config functions" {
     kcp.setNodelay(kcp_inst, 1, 20, 2, 1);
     try testing.expectEqual(@as(u32, 1), kcp_inst.nodelay);
     try testing.expectEqual(@as(u32, 20), kcp_inst.interval);
-    try testing.expectEqual(@as(i32, 2), kcp_inst.fastresend);
-    try testing.expectEqual(@as(i32, 1), kcp_inst.nocwnd);
+    try testing.expectEqual(@as(u32, 2), kcp_inst.fastresend);
+    try testing.expectEqual(true, kcp_inst.nocwnd);
     try testing.expectEqual(@as(u32, RTO_NDL), kcp_inst.rx_minrto);
 
     // Test wndsize
@@ -313,7 +313,7 @@ test "segment encode" {
     const allocator = testing.allocator;
 
     var seg = Segment.init(allocator);
-    defer seg.deinit(allocator);
+    defer seg.deinit();
 
     seg.conv = 0x12345678;
     seg.cmd = CMD_PUSH;
@@ -389,7 +389,7 @@ test "kcp stream mode" {
     const kcp_inst = try kcp.create(allocator, 1, null);
     defer kcp.release(kcp_inst);
 
-    kcp_inst.stream = 1;
+    kcp_inst.stream = true;
 
     // Send multiple small messages
     _ = try kcp.send(kcp_inst, "Hello");
@@ -454,10 +454,10 @@ test "recv with buffer too small" {
     try kcp_inst.rcv_queue.append(allocator, seg);
     kcp_inst.nrcv_que = 1;
 
-    // Try to receive with small buffer - should return -3
+    // Try to receive with small buffer - should return BufferTooSmall error
     var small_buf: [10]u8 = undefined;
-    const result = try kcp.recv(kcp_inst, &small_buf);
-    try testing.expectEqual(@as(i32, -3), result);
+    const result = kcp.recv(kcp_inst, &small_buf);
+    try testing.expectError(kcp.KcpError.BufferTooSmall, result);
 }
 
 test "send window full" {
@@ -650,8 +650,8 @@ test "out of order packets" {
     @memcpy(buf2[offset2..][0..seg2.data.items.len], seg2.data.items);
     _ = try kcp.input(kcp_inst, buf2[0 .. offset2 + seg2.data.items.len]);
 
-    seg1.deinit(allocator);
-    seg2.deinit(allocator);
+    seg1.deinit();
+    seg2.deinit();
 
     // Should buffer and reorder
     try testing.expect(kcp_inst.nrcv_buf > 0 or kcp_inst.nrcv_que > 0);
@@ -715,10 +715,10 @@ test "empty message handling" {
     const kcp_inst = try kcp.create(allocator, 1, null);
     defer kcp.release(kcp_inst);
 
-    // Try to send empty message - should return -1
+    // Try to send empty message - should return error
     const empty: [0]u8 = undefined;
-    const result = try kcp.send(kcp_inst, &empty);
-    try testing.expectEqual(@as(i32, -1), result);
+    const result = kcp.send(kcp_inst, &empty);
+    try testing.expectError(kcp.KcpError.EmptyData, result);
 }
 
 test "multiple fragments reassembly" {
@@ -757,14 +757,14 @@ test "multiple fragments reassembly" {
         _ = try kcp.input(kcp_inst, buf[0 .. offset + seg.data.items.len]);
     }
 
-    seg0.deinit(allocator);
-    seg1.deinit(allocator);
-    seg2.deinit(allocator);
+    seg0.deinit();
+    seg1.deinit();
+    seg2.deinit();
 
     // Should reassemble correctly
     var recv_buf: [100]u8 = undefined;
     const len = try kcp.recv(kcp_inst, &recv_buf);
-    try testing.expectEqual(@as(i32, 9), len);
+    try testing.expectEqual(@as(usize, 9), len);
     try testing.expectEqualStrings("AAABBBCCC", recv_buf[0..9]);
 }
 
@@ -1129,7 +1129,7 @@ test "stress test large data transfer" {
     defer allocator.free(recv_buf);
 
     const recv_len = try kcp.recv(kcp2, recv_buf);
-    try testing.expectEqual(@as(i32, @intCast(data_size)), recv_len);
+    try testing.expectEqual(data_size, recv_len);
 
     // Verify data integrity
     try testing.expectEqualSlices(u8, data, recv_buf[0..@intCast(recv_len)]);
@@ -1778,8 +1778,8 @@ test "nodelay mode 0 - normal mode" {
 
     try testing.expectEqual(@as(u32, 0), kcp_inst.nodelay);
     try testing.expectEqual(@as(u32, 100), kcp_inst.interval);
-    try testing.expectEqual(@as(i32, 0), kcp_inst.fastresend);
-    try testing.expectEqual(@as(i32, 0), kcp_inst.nocwnd);
+    try testing.expectEqual(@as(u32, 0), kcp_inst.fastresend);
+    try testing.expectEqual(false, kcp_inst.nocwnd);
     try testing.expectEqual(@as(u32, RTO_MIN), kcp_inst.rx_minrto);
 }
 
@@ -1794,8 +1794,8 @@ test "nodelay mode 1 - fast mode" {
 
     try testing.expectEqual(@as(u32, 1), kcp_inst.nodelay);
     try testing.expectEqual(@as(u32, 10), kcp_inst.interval);
-    try testing.expectEqual(@as(i32, 2), kcp_inst.fastresend);
-    try testing.expectEqual(@as(i32, 1), kcp_inst.nocwnd);
+    try testing.expectEqual(@as(u32, 2), kcp_inst.fastresend);
+    try testing.expectEqual(true, kcp_inst.nocwnd);
     try testing.expectEqual(@as(u32, RTO_NDL), kcp_inst.rx_minrto);
 }
 
@@ -1819,7 +1819,7 @@ test "nodelay mode comparison - retransmission behavior" {
     try testing.expect(kcp_fast.fastresend > kcp_normal.fastresend);
 
     // Fast mode should have no congestion control
-    try testing.expect(kcp_fast.nocwnd > kcp_normal.nocwnd);
+    try testing.expect(kcp_fast.nocwnd and !kcp_normal.nocwnd);
 }
 
 test "ssthresh congestion threshold adjustment" {

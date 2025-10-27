@@ -15,9 +15,20 @@ const segment = @import("segment.zig");
 const Kcp = types.Kcp;
 const Segment = types.Segment;
 
-//---------------------------------------------------------------------
-// create a new kcp control object
-//---------------------------------------------------------------------
+/// Creates a new KCP control object.
+///
+/// Parameters:
+///   - allocator: Memory allocator for KCP instance and buffers
+///   - conv: Conversation ID for multiplexing multiple connections
+///   - user: Optional user data pointer passed to output callback
+///
+/// Returns: Pointer to initialized KCP instance, or error if allocation fails
+///
+/// Example:
+/// ```zig
+/// const kcp_inst = try kcp.create(allocator, 1, null);
+/// defer kcp.release(kcp_inst);
+/// ```
 pub fn create(allocator: Allocator, conv: u32, user: ?*anyopaque) !*Kcp {
     const kcp = try allocator.create(Kcp);
     errdefer allocator.destroy(kcp);
@@ -67,8 +78,8 @@ pub fn create(allocator: Allocator, conv: u32, user: ?*anyopaque) !*Kcp {
         .buffer = buffer,
         .fastresend = 0,
         .fastlimit = types.FASTACK_LIMIT,
-        .nocwnd = 0,
-        .stream = 0,
+        .nocwnd = false,
+        .stream = false,
         .allocator = allocator,
         .user = user,
         .output = null,
@@ -77,27 +88,31 @@ pub fn create(allocator: Allocator, conv: u32, user: ?*anyopaque) !*Kcp {
     return kcp;
 }
 
-//---------------------------------------------------------------------
-// release kcp control object
-//---------------------------------------------------------------------
+/// Releases a KCP control object and frees all associated resources.
+///
+/// This function cleans up all internal buffers and deallocates the KCP instance.
+/// After calling this function, the KCP pointer is no longer valid.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance to release
 pub fn release(kcp: *Kcp) void {
     for (kcp.snd_buf.items) |*seg| {
-        seg.deinit(kcp.allocator);
+        seg.deinit();
     }
     kcp.snd_buf.deinit(kcp.allocator);
 
     for (kcp.rcv_buf.items) |*seg| {
-        seg.deinit(kcp.allocator);
+        seg.deinit();
     }
     kcp.rcv_buf.deinit(kcp.allocator);
 
     for (kcp.snd_queue.items) |*seg| {
-        seg.deinit(kcp.allocator);
+        seg.deinit();
     }
     kcp.snd_queue.deinit(kcp.allocator);
 
     for (kcp.rcv_queue.items) |*seg| {
-        seg.deinit(kcp.allocator);
+        seg.deinit();
     }
     kcp.rcv_queue.deinit(kcp.allocator);
 
@@ -106,9 +121,23 @@ pub fn release(kcp: *Kcp) void {
     kcp.allocator.destroy(kcp);
 }
 
-//---------------------------------------------------------------------
-// set output callback
-//---------------------------------------------------------------------
+/// Sets the output callback function for sending packets.
+///
+/// The callback is invoked when KCP needs to send data over the network.
+/// The application must implement this callback to handle actual packet transmission.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance
+///   - output: Callback function with signature: fn(buf: []const u8, kcp: *Kcp, user: ?*anyopaque) anyerror!i32
+///
+/// Example:
+/// ```zig
+/// fn outputCallback(buf: []const u8, kcp: *Kcp, user: ?*anyopaque) !i32 {
+///     // Send buf over UDP socket
+///     return @intCast(buf.len);
+/// }
+/// kcp.setOutput(kcp_inst, outputCallback);
+/// ```
 pub fn setOutput(kcp: *Kcp, output: *const fn (buf: []const u8, k: *Kcp, user: ?*anyopaque) anyerror!i32) void {
     kcp.output = output;
 }
@@ -141,21 +170,39 @@ pub fn peeksize(kcp: *const Kcp) !i32 {
     return @as(i32, @intCast(length));
 }
 
-//---------------------------------------------------------------------
-// user/upper level recv
-//---------------------------------------------------------------------
-pub fn recv(kcp: *Kcp, buffer: []u8) !i32 {
+/// Receives data from the KCP connection.
+///
+/// This function retrieves complete messages from the receive queue, handling
+/// fragmentation and reassembly automatically.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance
+///   - buffer: Destination buffer for received data
+///
+/// Returns: Number of bytes received, or error:
+///   - KcpError.NoData: No data available to receive
+///   - KcpError.FragmentIncomplete: Fragments not yet reassembled
+///   - KcpError.BufferTooSmall: Buffer too small for message
+///
+/// Example:
+/// ```zig
+/// var buf: [1024]u8 = undefined;
+/// const len = try kcp.recv(kcp_inst, &buf);
+/// // Process buf[0..len]
+/// ```
+pub fn recv(kcp: *Kcp, buffer: []u8) !usize {
     if (kcp.rcv_queue.items.len == 0) {
-        return -1;
+        return types.KcpError.NoData;
     }
 
     const peek_size = try peeksize(kcp);
     if (peek_size < 0) {
-        return -2;
+        return types.KcpError.FragmentIncomplete;
     }
 
-    if (peek_size > buffer.len) {
-        return -3;
+    const size: usize = @intCast(peek_size);
+    if (size > buffer.len) {
+        return types.KcpError.BufferTooSmall;
     }
 
     const recover = kcp.nrcv_que >= kcp.rcv_wnd;
@@ -179,11 +226,93 @@ pub fn recv(kcp: *Kcp, buffer: []u8) !i32 {
     // remove segments from queue
     for (0..n) |_| {
         var seg = kcp.rcv_queue.orderedRemove(0);
-        seg.deinit(kcp.allocator);
+        seg.deinit();
         kcp.nrcv_que -= 1;
     }
 
     // move available data from rcv_buf -> rcv_queue
+    try moveReadySegments(kcp);
+
+    // fast recover
+    if (kcp.nrcv_que < kcp.rcv_wnd and recover) {
+        kcp.probe |= types.ASK_TELL;
+    }
+
+    return len;
+}
+
+/// Sends data through the KCP connection.
+///
+/// Data is queued for transmission and will be sent when flush() or update() is called.
+/// Large data is automatically fragmented based on MTU/MSS settings.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance
+///   - buffer: Data to send
+///
+/// Returns: Number of bytes queued for sending, or error:
+///   - KcpError.EmptyData: Buffer is empty
+///   - KcpError.FragmentTooLarge: Data requires too many fragments
+///
+/// Example:
+/// ```zig
+/// const message = "Hello, KCP!";
+/// const sent = try kcp.send(kcp_inst, message);
+/// ```
+pub fn send(kcp: *Kcp, buffer: []const u8) !usize {
+    var len = buffer.len;
+    if (len == 0) {
+        return types.KcpError.EmptyData;
+    }
+
+    var sent: usize = 0;
+
+    // append to previous segment in streaming mode (if possible)
+    if (kcp.stream) {
+        if (kcp.snd_queue.items.len > 0) {
+            const old = &kcp.snd_queue.items[kcp.snd_queue.items.len - 1];
+            if (old.data.items.len < kcp.mss) {
+                const capacity = kcp.mss - old.data.items.len;
+                const extend = if (len < capacity) len else capacity;
+                try old.data.appendSlice(kcp.allocator, buffer[0..extend]);
+                len -= extend;
+                sent = extend;
+            }
+        }
+        if (len == 0) {
+            return sent;
+        }
+    }
+
+    const count = if (len <= kcp.mss) 1 else (len + kcp.mss - 1) / kcp.mss;
+
+    if (count >= types.WND_RCV) {
+        if (kcp.stream and sent > 0) {
+            return sent;
+        }
+        return types.KcpError.FragmentTooLarge;
+    }
+
+    // fragment
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const size = if (len > kcp.mss) kcp.mss else len;
+        var seg = Segment.init(kcp.allocator);
+        try seg.data.appendSlice(kcp.allocator, buffer[sent..][0..size]);
+        seg.frg = if (!kcp.stream) @as(u32, @intCast(count - i - 1)) else 0;
+        try kcp.snd_queue.append(kcp.allocator, seg);
+        kcp.nsnd_que += 1;
+        sent += size;
+        len -= size;
+    }
+
+    return sent;
+}
+
+//---------------------------------------------------------------------
+// move ready segments from rcv_buf to rcv_queue
+//---------------------------------------------------------------------
+fn moveReadySegments(kcp: *Kcp) !void {
     while (kcp.rcv_buf.items.len > 0) {
         const seg = &kcp.rcv_buf.items[0];
         if (seg.sn == kcp.rcv_nxt and kcp.nrcv_que < kcp.rcv_wnd) {
@@ -196,66 +325,6 @@ pub fn recv(kcp: *Kcp, buffer: []u8) !i32 {
             break;
         }
     }
-
-    // fast recover
-    if (kcp.nrcv_que < kcp.rcv_wnd and recover) {
-        kcp.probe |= types.ASK_TELL;
-    }
-
-    return @as(i32, @intCast(len));
-}
-
-//---------------------------------------------------------------------
-// user/upper level send
-//---------------------------------------------------------------------
-pub fn send(kcp: *Kcp, buffer: []const u8) !i32 {
-    var len = buffer.len;
-    if (len == 0) {
-        return -1;
-    }
-
-    var sent: usize = 0;
-
-    // append to previous segment in streaming mode (if possible)
-    if (kcp.stream != 0) {
-        if (kcp.snd_queue.items.len > 0) {
-            const old = &kcp.snd_queue.items[kcp.snd_queue.items.len - 1];
-            if (old.data.items.len < kcp.mss) {
-                const capacity = kcp.mss - old.data.items.len;
-                const extend = if (len < capacity) len else capacity;
-                try old.data.appendSlice(kcp.allocator, buffer[0..extend]);
-                len -= extend;
-                sent = extend;
-            }
-        }
-        if (len == 0) {
-            return @as(i32, @intCast(sent));
-        }
-    }
-
-    const count = if (len <= kcp.mss) 1 else (len + kcp.mss - 1) / kcp.mss;
-
-    if (count >= types.WND_RCV) {
-        if (kcp.stream != 0 and sent > 0) {
-            return @as(i32, @intCast(sent));
-        }
-        return -2;
-    }
-
-    // fragment
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const size = if (len > kcp.mss) kcp.mss else len;
-        var seg = Segment.init(kcp.allocator);
-        try seg.data.appendSlice(kcp.allocator, buffer[sent..][0..size]);
-        seg.frg = if (kcp.stream == 0) @as(u32, @intCast(count - i - 1)) else 0;
-        try kcp.snd_queue.append(kcp.allocator, seg);
-        kcp.nsnd_que += 1;
-        sent += size;
-        len -= size;
-    }
-
-    return @as(i32, @intCast(sent));
 }
 
 //---------------------------------------------------------------------
@@ -267,8 +336,8 @@ fn parseData(kcp: *Kcp, newseg: Segment) !void {
     if (utils.itimediff(sn, kcp.rcv_nxt + kcp.rcv_wnd) >= 0 or
         utils.itimediff(sn, kcp.rcv_nxt) < 0)
     {
-        var seg_copy = newseg;
-        seg_copy.deinit(kcp.allocator);
+        var seg_to_free = newseg;
+        seg_to_free.deinit();
         return;
     }
 
@@ -295,28 +364,30 @@ fn parseData(kcp: *Kcp, newseg: Segment) !void {
         try kcp.rcv_buf.insert(kcp.allocator, insert_idx, newseg);
         kcp.nrcv_buf += 1;
     } else {
-        var seg_copy = newseg;
-        seg_copy.deinit(kcp.allocator);
+        var seg_to_free = newseg;
+        seg_to_free.deinit();
     }
 
     // move available data from rcv_buf -> rcv_queue
-    while (kcp.rcv_buf.items.len > 0) {
-        const seg = &kcp.rcv_buf.items[0];
-        if (seg.sn == kcp.rcv_nxt and kcp.nrcv_que < kcp.rcv_wnd) {
-            const removed_seg = kcp.rcv_buf.orderedRemove(0);
-            try kcp.rcv_queue.append(kcp.allocator, removed_seg);
-            kcp.nrcv_buf -= 1;
-            kcp.nrcv_que += 1;
-            kcp.rcv_nxt += 1;
-        } else {
-            break;
-        }
-    }
+    try moveReadySegments(kcp);
 }
 
-//---------------------------------------------------------------------
-// input data
-//---------------------------------------------------------------------
+/// Processes incoming packet data.
+///
+/// Call this function when receiving packets from the network. KCP will parse
+/// the packet, update state, and queue data for the application to receive.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance
+///   - data: Raw packet data received from network
+///
+/// Returns: 0 on success, negative value on error (invalid packet format)
+///
+/// Example:
+/// ```zig
+/// // When UDP packet received
+/// _ = try kcp.input(kcp_inst, udp_packet);
+/// ```
 pub fn input(kcp: *Kcp, data: []const u8) !i32 {
     const prev_una = kcp.snd_una;
     var maxack: u32 = 0;
@@ -467,7 +538,7 @@ pub fn flush(kcp: *Kcp) !void {
     }
 
     var seg = Segment.init(kcp.allocator);
-    defer seg.deinit(kcp.allocator);
+    defer seg.deinit();
 
     seg.conv = kcp.conv;
     seg.cmd = types.CMD_ACK;
@@ -542,7 +613,7 @@ pub fn flush(kcp: *Kcp) !void {
 
     // calculate window size
     var cwnd = utils.imin(kcp.snd_wnd, kcp.rmt_wnd);
-    if (kcp.nocwnd == 0) {
+    if (!kcp.nocwnd) {
         cwnd = utils.imin(kcp.cwnd, cwnd);
     }
 
@@ -572,7 +643,7 @@ pub fn flush(kcp: *Kcp) !void {
     }
 
     // calculate resent
-    const resent: u32 = if (kcp.fastresend > 0) @as(u32, @intCast(kcp.fastresend)) else 0xffffffff;
+    const resent: u32 = if (kcp.fastresend > 0) kcp.fastresend else types.FASTACK_UNLIMITED;
     const rtomin: u32 = if (kcp.nodelay == 0) (kcp.rx_rto >> 3) else 0;
 
     var change: i32 = 0;
@@ -630,7 +701,7 @@ pub fn flush(kcp: *Kcp) !void {
             }
 
             if (segment_ptr.xmit >= kcp.dead_link) {
-                kcp.state = @as(u32, @bitCast(@as(i32, -1)));
+                kcp.state = types.STATE_DEAD;
             }
         }
     }
@@ -668,9 +739,23 @@ pub fn flush(kcp: *Kcp) !void {
     }
 }
 
-//---------------------------------------------------------------------
-// update state
-//---------------------------------------------------------------------
+/// Updates KCP state and flushes pending data.
+///
+/// Call this function periodically (e.g., every 10-100ms) to drive the KCP state machine.
+/// This handles retransmissions, acknowledgments, and flow control.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance
+///   - current: Current timestamp in milliseconds
+///
+/// Example:
+/// ```zig
+/// while (running) {
+///     const now = getCurrentTimeMs();
+///     try kcp.update(kcp_inst, now);
+///     std.time.sleep(10 * std.time.ns_per_ms);
+/// }
+/// ```
 pub fn update(kcp: *Kcp, current: u32) !void {
     kcp.current = current;
 
@@ -681,7 +766,7 @@ pub fn update(kcp: *Kcp, current: u32) !void {
 
     var slap = utils.itimediff(kcp.current, kcp.ts_flush);
 
-    if (slap >= 10000 or slap < -10000) {
+    if (slap >= types.TIME_DIFF_LIMIT or slap < -types.TIME_DIFF_LIMIT) {
         kcp.ts_flush = kcp.current;
         slap = 0;
     }
@@ -705,8 +790,8 @@ pub fn check(kcp: *const Kcp, current: u32) u32 {
 
     var ts_flush = kcp.ts_flush;
 
-    if (utils.itimediff(current, ts_flush) >= 10000 or
-        utils.itimediff(current, ts_flush) < -10000)
+    if (utils.itimediff(current, ts_flush) >= types.TIME_DIFF_LIMIT or
+        utils.itimediff(current, ts_flush) < -types.TIME_DIFF_LIMIT)
     {
         ts_flush = current;
     }
@@ -716,7 +801,7 @@ pub fn check(kcp: *const Kcp, current: u32) u32 {
     }
 
     const tm_flush = utils.itimediff(ts_flush, current);
-    var tm_packet: i32 = 0x7fffffff;
+    var tm_packet: i32 = types.MAX_PACKET_TIME;
 
     for (kcp.snd_buf.items) |*seg_item| {
         const diff = utils.itimediff(seg_item.resendts, current);
@@ -764,6 +849,25 @@ pub fn waitsnd(kcp: *const Kcp) u32 {
     return kcp.nsnd_buf + kcp.nsnd_que;
 }
 
+/// Configures KCP working mode for different latency/bandwidth trade-offs.
+///
+/// Parameters:
+///   - kcp: Pointer to KCP instance
+///   - nodelay: 0=normal mode (default), 1=low-latency mode, 2=ultra-low-latency
+///   - interval: Internal update interval in ms (10-5000, default 100ms)
+///   - resend: Fast retransmission threshold (0=disabled, default 0)
+///   - nc: Disable congestion control: 0=enable (default), 1=disable
+///
+/// Common configurations:
+/// - Normal mode:  setNodelay(kcp, 0, 100, 0, 0) - Best for throughput
+/// - Fast mode:    setNodelay(kcp, 1, 10, 2, 1)  - Low latency
+/// - Extreme mode: setNodelay(kcp, 2, 10, 2, 1)  - Minimum latency
+///
+/// Example:
+/// ```zig
+/// // Configure for low latency gaming
+/// kcp.setNodelay(kcp_inst, 1, 10, 2, 1);
+/// ```
 pub fn setNodelay(kcp: *Kcp, nodelay_: i32, interval_: i32, resend: i32, nc: i32) void {
     if (nodelay_ >= 0) {
         kcp.nodelay = @as(u32, @intCast(nodelay_));
@@ -783,9 +887,9 @@ pub fn setNodelay(kcp: *Kcp, nodelay_: i32, interval_: i32, resend: i32, nc: i32
         kcp.interval = @as(u32, @intCast(interval));
     }
     if (resend >= 0) {
-        kcp.fastresend = resend;
+        kcp.fastresend = @as(u32, @intCast(resend));
     }
     if (nc >= 0) {
-        kcp.nocwnd = nc;
+        kcp.nocwnd = nc != 0;
     }
 }

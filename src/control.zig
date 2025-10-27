@@ -53,7 +53,7 @@ pub fn parseAck(kcp: *Kcp, sn: u32) void {
         const seg = &kcp.snd_buf.items[idx];
         if (sn == seg.sn) {
             var removed = kcp.snd_buf.orderedRemove(idx);
-            removed.deinit(kcp.allocator);
+            removed.deinit();
             kcp.nsnd_buf -= 1;
             break;
         }
@@ -71,7 +71,7 @@ pub fn parseUna(kcp: *Kcp, una: u32) void {
         const seg = &kcp.snd_buf.items[0];
         if (utils.itimediff(una, seg.sn) > 0) {
             var removed = kcp.snd_buf.orderedRemove(0);
-            removed.deinit(kcp.allocator);
+            removed.deinit();
             kcp.nsnd_buf -= 1;
         } else {
             break;

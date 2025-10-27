@@ -49,6 +49,14 @@ pub const THRESH_MIN = types.THRESH_MIN;
 pub const PROBE_INIT = types.PROBE_INIT;
 pub const PROBE_LIMIT = types.PROBE_LIMIT;
 pub const FASTACK_LIMIT = types.FASTACK_LIMIT;
+pub const STATE_CONNECTED = types.STATE_CONNECTED;
+pub const STATE_DEAD = types.STATE_DEAD;
+pub const FASTACK_UNLIMITED = types.FASTACK_UNLIMITED;
+pub const TIME_DIFF_LIMIT = types.TIME_DIFF_LIMIT;
+pub const MAX_PACKET_TIME = types.MAX_PACKET_TIME;
+
+// Export error types
+pub const KcpError = types.KcpError;
 
 // Export main API functions
 pub const create = protocol.create;

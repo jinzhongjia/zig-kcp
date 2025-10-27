@@ -33,6 +33,26 @@ pub const PROBE_INIT: u32 = 7000; // 7 secs to probe window size
 pub const PROBE_LIMIT: u32 = 120000; // up to 120 secs to probe window
 pub const FASTACK_LIMIT: u32 = 5; // max times to trigger fastack
 
+// State constants
+pub const STATE_CONNECTED: u32 = 0;
+pub const STATE_DEAD: u32 = 0xFFFFFFFF;
+
+// Magic numbers
+pub const FASTACK_UNLIMITED: u32 = 0xffffffff;
+pub const TIME_DIFF_LIMIT: i32 = 10000;
+pub const MAX_PACKET_TIME: i32 = 0x7fffffff;
+
+//=====================================================================
+// KCP ERROR TYPES
+//=====================================================================
+pub const KcpError = error{
+    NoData,
+    BufferTooSmall,
+    FragmentIncomplete,
+    EmptyData,
+    FragmentTooLarge,
+};
+
 //=====================================================================
 // SEGMENT
 //=====================================================================
@@ -58,8 +78,8 @@ pub const Segment = struct {
         };
     }
 
-    pub fn deinit(self: *Segment, allocator: Allocator) void {
-        self.data.deinit(allocator);
+    pub fn deinit(self: *Segment) void {
+        self.data.deinit(self.allocator);
     }
 };
 
@@ -118,10 +138,10 @@ pub const Kcp = struct {
     acklist: std.ArrayList(u32),
 
     buffer: []u8,
-    fastresend: i32,
-    fastlimit: i32,
-    nocwnd: i32,
-    stream: i32,
+    fastresend: u32,
+    fastlimit: u32,
+    nocwnd: bool,
+    stream: bool,
 
     allocator: Allocator,
     user: ?*anyopaque,
