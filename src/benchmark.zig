@@ -123,23 +123,26 @@ fn benchmarkSendRecv(allocator: std.mem.Allocator, packet_size: usize) !Benchmar
 fn benchmarkEncodeDecode(allocator: std.mem.Allocator) !BenchmarkResult {
     const iterations: u64 = 1000000;
     var buf: [100]u8 = undefined;
-    var offset: usize = 0;
 
     var timer = try std.time.Timer.start();
 
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
-        offset = 0;
-        kcp.encode32u(&buf, &offset, @intCast(i));
-        kcp.encode32u(&buf, &offset, @intCast(i + 1));
-        kcp.encode16u(&buf, &offset, @intCast(i & 0xFFFF));
-        kcp.encode8u(&buf, &offset, @intCast(i & 0xFF));
+        var pos: usize = 0;
+        pos = kcp.encode32u(&buf, pos, @intCast(i));
+        pos = kcp.encode32u(&buf, pos, @intCast(i + 1));
+        pos = kcp.encode16u(&buf, pos, @intCast(i & 0xFFFF));
+        pos = kcp.encode8u(&buf, pos, @intCast(i & 0xFF));
 
-        offset = 0;
-        _ = kcp.decode32u(&buf, &offset);
-        _ = kcp.decode32u(&buf, &offset);
-        _ = kcp.decode16u(&buf, &offset);
-        _ = kcp.decode8u(&buf, &offset);
+        pos = 0;
+        var r32 = kcp.decode32u(&buf, pos);
+        pos = r32.offset;
+        r32 = kcp.decode32u(&buf, pos);
+        pos = r32.offset;
+        const r16 = kcp.decode16u(&buf, pos);
+        pos = r16.offset;
+        const r8 = kcp.decode8u(&buf, pos);
+        _ = r8.offset;
     }
 
     const elapsed = timer.read();

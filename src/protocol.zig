@@ -333,18 +333,40 @@ pub fn input(kcp: *Kcp, data: []const u8) !i32 {
             break;
         }
 
-        const conv = codec.decode32u(data, &offset);
+        var result32 = codec.decode32u(data, offset);
+        const conv = result32.value;
+        offset = result32.offset;
         if (conv != kcp.conv) {
             return -1;
         }
 
-        const cmd = codec.decode8u(data, &offset);
-        const frg = codec.decode8u(data, &offset);
-        const wnd = codec.decode16u(data, &offset);
-        const ts = codec.decode32u(data, &offset);
-        const sn = codec.decode32u(data, &offset);
-        const una = codec.decode32u(data, &offset);
-        const len = codec.decode32u(data, &offset);
+        var result8 = codec.decode8u(data, offset);
+        const cmd = result8.value;
+        offset = result8.offset;
+
+        result8 = codec.decode8u(data, offset);
+        const frg = result8.value;
+        offset = result8.offset;
+
+        const result16 = codec.decode16u(data, offset);
+        const wnd = result16.value;
+        offset = result16.offset;
+
+        result32 = codec.decode32u(data, offset);
+        const ts = result32.value;
+        offset = result32.offset;
+
+        result32 = codec.decode32u(data, offset);
+        const sn = result32.value;
+        offset = result32.offset;
+
+        result32 = codec.decode32u(data, offset);
+        const una = result32.value;
+        offset = result32.offset;
+
+        result32 = codec.decode32u(data, offset);
+        const len = result32.value;
+        offset = result32.offset;
 
         if (data.len - offset < len) {
             return -2;
@@ -466,7 +488,7 @@ pub fn flush(kcp: *Kcp) !void {
         }
         seg.sn = kcp.acklist.items[i];
         seg.ts = kcp.acklist.items[i + 1];
-        segment.encode(&seg, kcp.buffer, &offset);
+        offset = segment.encode(&seg, kcp.buffer, offset);
     }
     kcp.acklist.clearRetainingCapacity();
 
@@ -502,7 +524,7 @@ pub fn flush(kcp: *Kcp) !void {
             }
             offset = 0;
         }
-        segment.encode(&seg, kcp.buffer, &offset);
+        offset = segment.encode(&seg, kcp.buffer, offset);
     }
 
     if (kcp.probe & types.ASK_TELL != 0) {
@@ -513,7 +535,7 @@ pub fn flush(kcp: *Kcp) !void {
             }
             offset = 0;
         }
-        segment.encode(&seg, kcp.buffer, &offset);
+        offset = segment.encode(&seg, kcp.buffer, offset);
     }
 
     kcp.probe = 0;
@@ -600,7 +622,7 @@ pub fn flush(kcp: *Kcp) !void {
                 offset = 0;
             }
 
-            segment.encode(segment_ptr, kcp.buffer, &offset);
+            offset = segment.encode(segment_ptr, kcp.buffer, offset);
 
             if (segment_ptr.data.items.len > 0) {
                 @memcpy(kcp.buffer[offset..][0..segment_ptr.data.items.len], segment_ptr.data.items);

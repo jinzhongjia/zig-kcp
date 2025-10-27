@@ -32,48 +32,42 @@ const itimediff = kcp.itimediff;
 
 test "encode and decode 8u" {
     var buf: [10]u8 = undefined;
-    var offset: usize = 0;
 
-    encode8u(&buf, &offset, 0x42);
+    const offset = encode8u(&buf, 0, 0x42);
     try testing.expectEqual(@as(usize, 1), offset);
     try testing.expectEqual(@as(u8, 0x42), buf[0]);
 
-    offset = 0;
-    const value = decode8u(&buf, &offset);
-    try testing.expectEqual(@as(u8, 0x42), value);
-    try testing.expectEqual(@as(usize, 1), offset);
+    const result = decode8u(&buf, 0);
+    try testing.expectEqual(@as(u8, 0x42), result.value);
+    try testing.expectEqual(@as(usize, 1), result.offset);
 }
 
 test "encode and decode 16u" {
     var buf: [10]u8 = undefined;
-    var offset: usize = 0;
 
-    encode16u(&buf, &offset, 0x1234);
+    const offset = encode16u(&buf, 0, 0x1234);
     try testing.expectEqual(@as(usize, 2), offset);
     try testing.expectEqual(@as(u8, 0x34), buf[0]);
     try testing.expectEqual(@as(u8, 0x12), buf[1]);
 
-    offset = 0;
-    const value = decode16u(&buf, &offset);
-    try testing.expectEqual(@as(u16, 0x1234), value);
-    try testing.expectEqual(@as(usize, 2), offset);
+    const result = decode16u(&buf, 0);
+    try testing.expectEqual(@as(u16, 0x1234), result.value);
+    try testing.expectEqual(@as(usize, 2), result.offset);
 }
 
 test "encode and decode 32u" {
     var buf: [10]u8 = undefined;
-    var offset: usize = 0;
 
-    encode32u(&buf, &offset, 0x12345678);
+    const offset = encode32u(&buf, 0, 0x12345678);
     try testing.expectEqual(@as(usize, 4), offset);
     try testing.expectEqual(@as(u8, 0x78), buf[0]);
     try testing.expectEqual(@as(u8, 0x56), buf[1]);
     try testing.expectEqual(@as(u8, 0x34), buf[2]);
     try testing.expectEqual(@as(u8, 0x12), buf[3]);
 
-    offset = 0;
-    const value = decode32u(&buf, &offset);
-    try testing.expectEqual(@as(u32, 0x12345678), value);
-    try testing.expectEqual(@as(usize, 4), offset);
+    const result = decode32u(&buf, 0);
+    try testing.expectEqual(@as(u32, 0x12345678), result.value);
+    try testing.expectEqual(@as(usize, 4), result.offset);
 }
 
 test "utility functions" {
@@ -303,10 +297,9 @@ test "kcp check function" {
 
 test "getconv function" {
     var buf: [24]u8 = undefined;
-    var offset: usize = 0;
 
     const conv: u32 = 0xDEADBEEF;
-    encode32u(&buf, &offset, conv);
+    _ = encode32u(&buf, 0, conv);
 
     const decoded_conv = try getconv(&buf);
     try testing.expectEqual(conv, decoded_conv);
@@ -332,21 +325,42 @@ test "segment encode" {
     try seg.data.appendSlice(allocator, "test");
 
     var buf: [100]u8 = undefined;
-    var offset: usize = 0;
-    kcp.segment.encode(&seg, &buf, &offset);
+    const offset = kcp.segment.encode(&seg, &buf, 0);
 
     try testing.expectEqual(@as(usize, OVERHEAD), offset);
 
     // Decode and verify
-    offset = 0;
-    try testing.expectEqual(@as(u32, 0x12345678), decode32u(&buf, &offset));
-    try testing.expectEqual(@as(u8, CMD_PUSH), decode8u(&buf, &offset));
-    try testing.expectEqual(@as(u8, 5), decode8u(&buf, &offset));
-    try testing.expectEqual(@as(u16, 256), decode16u(&buf, &offset));
-    try testing.expectEqual(@as(u32, 1000), decode32u(&buf, &offset));
-    try testing.expectEqual(@as(u32, 42), decode32u(&buf, &offset));
-    try testing.expectEqual(@as(u32, 10), decode32u(&buf, &offset));
-    try testing.expectEqual(@as(u32, 4), decode32u(&buf, &offset));
+    var pos: usize = 0;
+    var r32 = decode32u(&buf, pos);
+    try testing.expectEqual(@as(u32, 0x12345678), r32.value);
+    pos = r32.offset;
+
+    var r8 = decode8u(&buf, pos);
+    try testing.expectEqual(@as(u8, CMD_PUSH), r8.value);
+    pos = r8.offset;
+
+    r8 = decode8u(&buf, pos);
+    try testing.expectEqual(@as(u8, 5), r8.value);
+    pos = r8.offset;
+
+    const r16 = decode16u(&buf, pos);
+    try testing.expectEqual(@as(u16, 256), r16.value);
+    pos = r16.offset;
+
+    r32 = decode32u(&buf, pos);
+    try testing.expectEqual(@as(u32, 1000), r32.value);
+    pos = r32.offset;
+
+    r32 = decode32u(&buf, pos);
+    try testing.expectEqual(@as(u32, 42), r32.value);
+    pos = r32.offset;
+
+    r32 = decode32u(&buf, pos);
+    try testing.expectEqual(@as(u32, 10), r32.value);
+    pos = r32.offset;
+
+    r32 = decode32u(&buf, pos);
+    try testing.expectEqual(@as(u32, 4), r32.value);
 }
 
 test "kcp peeksize" {
@@ -394,18 +408,18 @@ test "input with invalid conv" {
 
     // Create a packet with different conv
     var buf: [100]u8 = undefined;
-    var offset: usize = 0;
-    encode32u(&buf, &offset, 0x5678); // different conv
-    encode8u(&buf, &offset, CMD_PUSH);
-    encode8u(&buf, &offset, 0); // frg
-    encode16u(&buf, &offset, 32); // wnd
-    encode32u(&buf, &offset, 0); // ts
-    encode32u(&buf, &offset, 0); // sn
-    encode32u(&buf, &offset, 0); // una
-    encode32u(&buf, &offset, 4); // len
+    var pos: usize = 0;
+    pos = encode32u(&buf, pos, 0x5678); // different conv
+    pos = encode8u(&buf, pos, CMD_PUSH);
+    pos = encode8u(&buf, pos, 0); // frg
+    pos = encode16u(&buf, pos, 32); // wnd
+    pos = encode32u(&buf, pos, 0); // ts
+    pos = encode32u(&buf, pos, 0); // sn
+    pos = encode32u(&buf, pos, 0); // una
+    pos = encode32u(&buf, pos, 4); // len
 
     // Should be rejected due to conv mismatch
-    const result = try kcp.input(kcp_inst, buf[0..offset]);
+    const result = try kcp.input(kcp_inst, buf[0..pos]);
     try testing.expectEqual(@as(i32, -1), result);
 }
 
@@ -627,14 +641,12 @@ test "out of order packets" {
 
     // Encode and input out of order
     var buf1: [100]u8 = undefined;
-    var offset1: usize = 0;
-    kcp.segment.encode(&seg1, &buf1, &offset1);
+    const offset1 = kcp.segment.encode(&seg1, &buf1, 0);
     @memcpy(buf1[offset1..][0..seg1.data.items.len], seg1.data.items);
     _ = try kcp.input(kcp_inst, buf1[0 .. offset1 + seg1.data.items.len]);
 
     var buf2: [100]u8 = undefined;
-    var offset2: usize = 0;
-    kcp.segment.encode(&seg2, &buf2, &offset2);
+    const offset2 = kcp.segment.encode(&seg2, &buf2, 0);
     @memcpy(buf2[offset2..][0..seg2.data.items.len], seg2.data.items);
     _ = try kcp.input(kcp_inst, buf2[0 .. offset2 + seg2.data.items.len]);
 
@@ -740,8 +752,7 @@ test "multiple fragments reassembly" {
     // Input all fragments
     var buf: [100]u8 = undefined;
     for ([_]*Segment{ &seg0, &seg1, &seg2 }) |seg| {
-        var offset: usize = 0;
-        kcp.segment.encode(seg, &buf, &offset);
+        const offset = kcp.segment.encode(seg, &buf, 0);
         @memcpy(buf[offset..][0..seg.data.items.len], seg.data.items);
         _ = try kcp.input(kcp_inst, buf[0 .. offset + seg.data.items.len]);
     }
@@ -864,19 +875,19 @@ test "invalid command type" {
 
     // Create packet with invalid command
     var buf: [100]u8 = undefined;
-    var offset: usize = 0;
+    var pos: usize = 0;
 
-    encode32u(&buf, &offset, 1); // conv
-    encode8u(&buf, &offset, 99); // invalid cmd
-    encode8u(&buf, &offset, 0); // frg
-    encode16u(&buf, &offset, 32); // wnd
-    encode32u(&buf, &offset, 0); // ts
-    encode32u(&buf, &offset, 0); // sn
-    encode32u(&buf, &offset, 0); // una
-    encode32u(&buf, &offset, 0); // len
+    pos = encode32u(&buf, pos, 1); // conv
+    pos = encode8u(&buf, pos, 99); // invalid cmd
+    pos = encode8u(&buf, pos, 0); // frg
+    pos = encode16u(&buf, pos, 32); // wnd
+    pos = encode32u(&buf, pos, 0); // ts
+    pos = encode32u(&buf, pos, 0); // sn
+    pos = encode32u(&buf, pos, 0); // una
+    pos = encode32u(&buf, pos, 0); // len
 
     // Should reject invalid command
-    const result = try kcp.input(kcp_inst, buf[0..offset]);
+    const result = try kcp.input(kcp_inst, buf[0..pos]);
     try testing.expectEqual(@as(i32, -3), result);
 }
 
@@ -929,9 +940,8 @@ test "fuzz malformed packets" {
 
         // Randomly set conv to valid or invalid
         if (random.boolean()) {
-            var offset: usize = 0;
             if (size >= 4) {
-                encode32u(&buf, &offset, 1); // valid conv
+                _ = encode32u(&buf, 0, 1); // valid conv
             }
         }
 
@@ -962,18 +972,18 @@ test "fuzz edge case values" {
 
     for (edge_values) |val| {
         var buf: [100]u8 = undefined;
-        var offset: usize = 0;
+        var pos: usize = 0;
 
-        encode32u(&buf, &offset, 1); // conv
-        encode8u(&buf, &offset, CMD_PUSH);
-        encode8u(&buf, &offset, @truncate(val)); // frg
-        encode16u(&buf, &offset, @truncate(val)); // wnd
-        encode32u(&buf, &offset, val); // ts
-        encode32u(&buf, &offset, val); // sn
-        encode32u(&buf, &offset, val); // una
-        encode32u(&buf, &offset, 0); // len
+        pos = encode32u(&buf, pos, 1); // conv
+        pos = encode8u(&buf, pos, CMD_PUSH);
+        pos = encode8u(&buf, pos, @truncate(val)); // frg
+        pos = encode16u(&buf, pos, @truncate(val)); // wnd
+        pos = encode32u(&buf, pos, val); // ts
+        pos = encode32u(&buf, pos, val); // sn
+        pos = encode32u(&buf, pos, val); // una
+        pos = encode32u(&buf, pos, 0); // len
 
-        _ = kcp.input(kcp_inst, buf[0..offset]) catch {};
+        _ = kcp.input(kcp_inst, buf[0..pos]) catch {};
     }
 
     try testing.expect(true);

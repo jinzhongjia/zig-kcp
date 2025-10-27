@@ -13,6 +13,6 @@ const Kcp = types.Kcp;
 //---------------------------------------------------------------------
 // segment encode wrapper
 //---------------------------------------------------------------------
-pub fn encode(seg: *const Segment, buf: []u8, offset: *usize) void {
-    codec.encodeSegment(seg, buf, offset);
+pub fn encode(seg: *const Segment, buf: []u8, offset: usize) usize {
+    return codec.encodeSegment(seg, buf, offset);
 }
