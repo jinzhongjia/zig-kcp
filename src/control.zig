@@ -49,16 +49,23 @@ pub fn parseAck(kcp: *Kcp, sn: u32) void {
         return;
     }
 
-    for (0..kcp.snd_buf.items.len) |idx| {
-        const seg = &kcp.snd_buf.items[idx];
-        if (sn == seg.sn) {
-            const removed = kcp.snd_buf.orderedRemove(idx);
+    var left: usize = 0;
+    var right: usize = kcp.snd_buf.items.len;
+
+    while (left < right) {
+        const mid = left + (right - left) / 2;
+        const seg = &kcp.snd_buf.items[mid];
+        const diff = utils.itimediff(sn, seg.sn);
+        if (diff == 0) {
+            const removed = kcp.snd_buf.orderedRemove(mid);
             kcp.recycleSegment(removed);
             kcp.nsnd_buf -= 1;
-            break;
+            return;
         }
-        if (utils.itimediff(sn, seg.sn) < 0) {
-            break;
+        if (diff > 0) {
+            left = mid + 1;
+        } else {
+            right = mid;
         }
     }
 }
@@ -115,7 +122,11 @@ pub fn parseFastack(kcp: *Kcp, sn: u32, ts: u32) void {
 //---------------------------------------------------------------------
 pub fn ackPush(kcp: *Kcp, sn: u32, ts: u32) !void {
     if (kcp.acklist.items.len == kcp.acklist.capacity) {
-        const desired = kcp.acklist.items.len + 8;
+        const minimal = kcp.acklist.items.len + 1;
+        var desired = if (kcp.acklist.capacity == 0) minimal + 7 else kcp.acklist.capacity * 2;
+        if (desired < minimal) {
+            desired = minimal;
+        }
         try kcp.acklist.ensureTotalCapacity(kcp.allocator, desired);
     }
     kcp.acklist.appendAssumeCapacity(.{ .sn = sn, .ts = ts });

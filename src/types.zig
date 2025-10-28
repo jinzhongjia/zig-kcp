@@ -162,18 +162,29 @@ pub const Kcp = struct {
 
     pub fn refreshSegmentPoolLimit(self: *Kcp) void {
         self.segment_pool_limit = computeSegmentPoolLimit(self.rcv_wnd, self.snd_wnd);
+        if (self.segment_pool.capacity < self.segment_pool_limit) {
+            self.segment_pool.ensureTotalCapacity(self.allocator, self.segment_pool_limit) catch {};
+        }
     }
 
     pub fn takeSegment(self: *Kcp) Segment {
+        const target_capacity = @as(usize, @intCast(self.mss));
         if (self.segment_pool.items.len > 0) {
             const idx = self.segment_pool.items.len - 1;
             const seg = self.segment_pool.items[idx];
             self.segment_pool.items.len = idx;
             var reusable = seg;
             reusable.data.clearRetainingCapacity();
+            if (target_capacity > 0 and reusable.data.capacity < target_capacity) {
+                reusable.data.ensureTotalCapacity(self.allocator, target_capacity) catch {};
+            }
             return reusable;
         }
-        return Segment.init(self.allocator);
+        var fresh = Segment.init(self.allocator);
+        if (target_capacity > 0) {
+            fresh.data.ensureTotalCapacity(self.allocator, target_capacity) catch {};
+        }
+        return fresh;
     }
 
     pub fn recycleSegment(self: *Kcp, seg: Segment) void {

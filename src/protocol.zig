@@ -87,6 +87,8 @@ pub fn create(allocator: Allocator, conv: u32, user: ?*anyopaque) !*Kcp {
         .segment_pool_limit = types.computeSegmentPoolLimit(types.WND_RCV, types.WND_SND),
     };
 
+    kcp.refreshSegmentPoolLimit();
+
     return kcp;
 }
 
@@ -375,26 +377,28 @@ fn parseData(kcp: *Kcp, newseg: Segment) !void {
         return;
     }
 
-    // insert into rcv_buf in order
-    var insert_idx: usize = kcp.rcv_buf.items.len;
+    // insert into rcv_buf in order using binary search
+    var low: usize = 0;
+    var high: usize = kcp.rcv_buf.items.len;
+    var insert_idx: usize = 0;
     var repeat = false;
 
-    var i: usize = kcp.rcv_buf.items.len;
-    while (i > 0) {
-        i -= 1;
-        const seg = &kcp.rcv_buf.items[i];
-        if (seg.sn == sn) {
+    while (low < high and !repeat) {
+        const mid = low + (high - low) / 2;
+        const seg = &kcp.rcv_buf.items[mid];
+        const diff = utils.itimediff(sn, seg.sn);
+        if (diff == 0) {
             repeat = true;
             break;
+        } else if (diff > 0) {
+            low = mid + 1;
+        } else {
+            high = mid;
         }
-        if (utils.itimediff(sn, seg.sn) > 0) {
-            insert_idx = i + 1;
-            break;
-        }
-        insert_idx = i;
     }
 
     if (!repeat) {
+        insert_idx = low;
         try kcp.rcv_buf.insert(kcp.allocator, insert_idx, newseg);
         kcp.nrcv_buf += 1;
     } else {
