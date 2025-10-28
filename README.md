@@ -202,8 +202,11 @@ Extract conversation ID from a packet
 # Run unit tests
 zig build test
 
-# Run performance benchmarks
+# Run performance benchmarks (fast, suitable for CI)
 zig build bench
+
+# Run integration tests with network simulation (slow, for manual testing)
+zig build perf
 
 # View detailed test output
 zig build test --summary all

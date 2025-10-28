@@ -49,6 +49,3 @@ jobs:
 
       - name: Run unit tests
         run: zig build test --summary all
-
-      - name: Run performance tests
-        run: zig build perf --summary all

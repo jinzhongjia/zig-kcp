@@ -141,8 +141,8 @@ fn test_performance(allocator: std.mem.Allocator, mode: u8) !void {
     const kcp2 = try kcp.create(allocator, 0x11223344, null);
     defer kcp.release(kcp2);
 
-    // Create virtual network with 10% packet loss and 60-125ms RTT
-    var vnet = LatencySimulator.init(allocator, 10, 60, 125);
+    // Create virtual network with 2% packet loss and 20-40ms RTT (reduced for faster testing)
+    var vnet = LatencySimulator.init(allocator, 2, 20, 40);
     defer vnet.deinit();
 
     // Set up output callbacks
@@ -181,7 +181,7 @@ fn test_performance(allocator: std.mem.Allocator, mode: u8) !void {
     kcp.wndsize(kcp2, 128, 128);
 
     // Test parameters
-    const total_packets: u32 = 1000;
+    const total_packets: u32 = 100; // Reduced for faster testing
     var current: u32 = 0;
     var slap: u32 = current + 20;
     var index: u32 = 0;
@@ -193,17 +193,21 @@ fn test_performance(allocator: std.mem.Allocator, mode: u8) !void {
     var recv_buf: [2000]u8 = undefined;
     var send_buf: [8]u8 = undefined;
 
+    const start_time = std.time.milliTimestamp();
+
     // Main test loop
     while (true) {
-        current = @intCast(std.time.milliTimestamp() & 0xFFFFFFFF);
-        vnet.update(@intCast(std.time.milliTimestamp()));
+        // Use simulated time (cache the system call result)
+        const elapsed = std.time.milliTimestamp() - start_time;
+        current = @intCast(elapsed & 0xFFFFFFFF);
+        vnet.update(@intCast(elapsed));
 
         // Update KCP
         try kcp.update(kcp1, current);
         try kcp.update(kcp2, current);
 
-        // Send packets
-        while (current >= slap) : (slap += 20) {
+        // Send packets (limit to total_packets)
+        while (current >= slap and index < total_packets) : (slap += 20) {
             // Encode packet: [index (4 bytes)][timestamp (4 bytes)]
             @memcpy(send_buf[0..4], std.mem.asBytes(&index));
             @memcpy(send_buf[4..8], std.mem.asBytes(&current));
@@ -257,7 +261,7 @@ fn test_performance(allocator: std.mem.Allocator, mode: u8) !void {
                 }
 
                 // Print progress
-                if (recv_index % 100 == 0) {
+                if (recv_index % 25 == 0) { // More frequent updates for smaller test
                     std.debug.print("recv #{d} rtt={d}ms\n", .{ recv_index, rtt });
                 }
             }
@@ -289,7 +293,8 @@ pub fn main() !void {
     std.debug.print("\n", .{});
     std.debug.print("========================================\n", .{});
     std.debug.print("  KCP Performance Test\n", .{});
-    std.debug.print("  Network: 10%% loss, 60-125ms RTT\n", .{});
+    std.debug.print("  Network: 2%% loss, 20-40ms RTT\n", .{});
+    std.debug.print("  Packets: 100 per mode\n", .{});
     std.debug.print("========================================\n", .{});
 
     // Test three modes

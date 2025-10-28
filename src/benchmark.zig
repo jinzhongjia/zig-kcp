@@ -96,7 +96,7 @@ fn benchmarkSendRecv(allocator: std.mem.Allocator, packet_size: usize) !Benchmar
         while (attempts < 100) : (attempts += 1) {
             try kcp.update(kcp1, time);
             try kcp.update(kcp2, time);
-            time += 1;
+            time += 10; // Match KCP interval
 
             const recv_len = kcp.recv(kcp2, recv_buf) catch continue;
             if (recv_len > 0) break;
@@ -234,10 +234,10 @@ fn benchmarkFragmentation(allocator: std.mem.Allocator) !BenchmarkResult {
         _ = try kcp.send(kcp1, data);
 
         var attempts: u32 = 0;
-        while (attempts < 1000) : (attempts += 1) {
+        while (attempts < 200) : (attempts += 1) {
             try kcp.update(kcp1, time);
             try kcp.update(kcp2, time);
-            time += 1;
+            time += 10; // Match KCP interval
 
             const recv_len = kcp.recv(kcp2, recv_buf) catch continue;
             if (recv_len > 0) break;

@@ -55,4 +55,50 @@ pub fn build(b: *std.Build) void {
 
     const run_perf = b.addRunArtifact(perf_exe);
     perf_step.dependOn(&run_perf.step);
+
+    // UDP Server Example
+    const server_step = b.step("server", "Run UDP KCP server example");
+    const server_exe = b.addExecutable(.{
+        .name = "udp_server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "kcp", .module = kcp_module },
+            },
+        }),
+    });
+
+    const run_server = b.addRunArtifact(server_exe);
+    if (b.args) |args| {
+        run_server.addArgs(args);
+    }
+    server_step.dependOn(&run_server.step);
+
+    // Install server executable
+    b.installArtifact(server_exe);
+
+    // UDP Client Example
+    const client_step = b.step("client", "Run UDP KCP client example");
+    const client_exe = b.addExecutable(.{
+        .name = "udp_client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "kcp", .module = kcp_module },
+            },
+        }),
+    });
+
+    const run_client = b.addRunArtifact(client_exe);
+    if (b.args) |args| {
+        run_client.addArgs(args);
+    }
+    client_step.dependOn(&run_client.step);
+
+    // Install client executable
+    b.installArtifact(client_exe);
 }
