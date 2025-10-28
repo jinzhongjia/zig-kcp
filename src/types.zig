@@ -41,6 +41,12 @@ pub const STATE_DEAD: u32 = 0xFFFFFFFF;
 pub const FASTACK_UNLIMITED: u32 = 0xffffffff;
 pub const TIME_DIFF_LIMIT: i32 = 10000;
 pub const MAX_PACKET_TIME: i32 = 0x7fffffff;
+pub const SEGMENT_POOL_RESERVE: u32 = 16;
+
+pub inline fn computeSegmentPoolLimit(rcv_wnd: u32, snd_wnd: u32) usize {
+    const total = rcv_wnd + snd_wnd + SEGMENT_POOL_RESERVE;
+    return @as(usize, @intCast(total));
+}
 
 //=====================================================================
 // KCP ERROR TYPES
@@ -51,6 +57,11 @@ pub const KcpError = error{
     FragmentIncomplete,
     EmptyData,
     FragmentTooLarge,
+};
+
+pub const AckItem = struct {
+    sn: u32,
+    ts: u32,
 };
 
 //=====================================================================
@@ -135,7 +146,7 @@ pub const Kcp = struct {
     snd_buf: std.ArrayList(Segment),
     rcv_buf: std.ArrayList(Segment),
 
-    acklist: std.ArrayList(u32),
+    acklist: std.ArrayList(AckItem),
 
     buffer: []u8,
     fastresend: u32,
@@ -146,4 +157,39 @@ pub const Kcp = struct {
     allocator: Allocator,
     user: ?*anyopaque,
     output: ?*const fn (buf: []const u8, kcp: *Kcp, user: ?*anyopaque) anyerror!i32,
+    segment_pool: std.ArrayList(Segment),
+    segment_pool_limit: usize,
+
+    pub fn refreshSegmentPoolLimit(self: *Kcp) void {
+        self.segment_pool_limit = computeSegmentPoolLimit(self.rcv_wnd, self.snd_wnd);
+    }
+
+    pub fn takeSegment(self: *Kcp) Segment {
+        if (self.segment_pool.items.len > 0) {
+            const idx = self.segment_pool.items.len - 1;
+            const seg = self.segment_pool.items[idx];
+            self.segment_pool.items.len = idx;
+            var reusable = seg;
+            reusable.data.clearRetainingCapacity();
+            return reusable;
+        }
+        return Segment.init(self.allocator);
+    }
+
+    pub fn recycleSegment(self: *Kcp, seg: Segment) void {
+        var reusable = seg;
+        reusable.data.clearRetainingCapacity();
+
+        if (self.segment_pool.items.len >= self.segment_pool_limit) {
+            reusable.deinit();
+            return;
+        }
+
+        self.segment_pool.ensureTotalCapacity(self.allocator, self.segment_pool.items.len + 1) catch {
+            reusable.deinit();
+            return;
+        };
+
+        self.segment_pool.appendAssumeCapacity(reusable);
+    }
 };

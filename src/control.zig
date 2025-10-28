@@ -52,8 +52,8 @@ pub fn parseAck(kcp: *Kcp, sn: u32) void {
     for (0..kcp.snd_buf.items.len) |idx| {
         const seg = &kcp.snd_buf.items[idx];
         if (sn == seg.sn) {
-            var removed = kcp.snd_buf.orderedRemove(idx);
-            removed.deinit();
+            const removed = kcp.snd_buf.orderedRemove(idx);
+            kcp.recycleSegment(removed);
             kcp.nsnd_buf -= 1;
             break;
         }
@@ -67,16 +67,28 @@ pub fn parseAck(kcp: *Kcp, sn: u32) void {
 // parse una
 //---------------------------------------------------------------------
 pub fn parseUna(kcp: *Kcp, una: u32) void {
-    while (kcp.snd_buf.items.len > 0) {
-        const seg = &kcp.snd_buf.items[0];
+    var remove_count: usize = 0;
+    while (remove_count < kcp.snd_buf.items.len) {
+        const seg = &kcp.snd_buf.items[remove_count];
         if (utils.itimediff(una, seg.sn) > 0) {
-            var removed = kcp.snd_buf.orderedRemove(0);
-            removed.deinit();
-            kcp.nsnd_buf -= 1;
+            remove_count += 1;
         } else {
             break;
         }
     }
+
+    if (remove_count == 0) {
+        return;
+    }
+
+    for (0..remove_count) |i| {
+        const seg_ptr = &kcp.snd_buf.items[i];
+        const seg_value = seg_ptr.*;
+        seg_ptr.* = Segment.init(kcp.allocator);
+        kcp.recycleSegment(seg_value);
+    }
+    kcp.snd_buf.replaceRangeAssumeCapacity(0, remove_count, &.{});
+    kcp.nsnd_buf -= @as(u32, @intCast(remove_count));
 }
 
 //---------------------------------------------------------------------
@@ -102,8 +114,11 @@ pub fn parseFastack(kcp: *Kcp, sn: u32, ts: u32) void {
 // ack push
 //---------------------------------------------------------------------
 pub fn ackPush(kcp: *Kcp, sn: u32, ts: u32) !void {
-    try kcp.acklist.append(kcp.allocator, sn);
-    try kcp.acklist.append(kcp.allocator, ts);
+    if (kcp.acklist.items.len == kcp.acklist.capacity) {
+        const desired = kcp.acklist.items.len + 8;
+        try kcp.acklist.ensureTotalCapacity(kcp.allocator, desired);
+    }
+    kcp.acklist.appendAssumeCapacity(.{ .sn = sn, .ts = ts });
 }
 
 //---------------------------------------------------------------------

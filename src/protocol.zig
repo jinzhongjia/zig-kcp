@@ -83,6 +83,8 @@ pub fn create(allocator: Allocator, conv: u32, user: ?*anyopaque) !*Kcp {
         .allocator = allocator,
         .user = user,
         .output = null,
+        .segment_pool = .empty,
+        .segment_pool_limit = types.computeSegmentPoolLimit(types.WND_RCV, types.WND_SND),
     };
 
     return kcp;
@@ -118,6 +120,10 @@ pub fn release(kcp: *Kcp) void {
 
     kcp.acklist.deinit(kcp.allocator);
     kcp.allocator.free(kcp.buffer);
+    for (kcp.segment_pool.items) |*seg| {
+        seg.deinit();
+    }
+    kcp.segment_pool.deinit(kcp.allocator);
     kcp.allocator.destroy(kcp);
 }
 
@@ -224,10 +230,15 @@ pub fn recv(kcp: *Kcp, buffer: []u8) !usize {
     }
 
     // remove segments from queue
-    for (0..n) |_| {
-        var seg = kcp.rcv_queue.orderedRemove(0);
-        seg.deinit();
-        kcp.nrcv_que -= 1;
+    if (n > 0) {
+        for (0..n) |i| {
+            const seg_ptr = &kcp.rcv_queue.items[i];
+            const seg_value = seg_ptr.*;
+            seg_ptr.* = Segment.init(kcp.allocator);
+            kcp.recycleSegment(seg_value);
+        }
+        kcp.rcv_queue.replaceRangeAssumeCapacity(0, n, &.{});
+        kcp.nrcv_que -= @as(u32, @intCast(n));
     }
 
     // move available data from rcv_buf -> rcv_queue
@@ -297,10 +308,13 @@ pub fn send(kcp: *Kcp, buffer: []const u8) !usize {
     var i: usize = 0;
     while (i < count) : (i += 1) {
         const size = if (len > kcp.mss) kcp.mss else len;
-        var seg = Segment.init(kcp.allocator);
+        var seg = kcp.takeSegment();
+        var segment_owned = true;
+        errdefer if (segment_owned) kcp.recycleSegment(seg);
         try seg.data.appendSlice(kcp.allocator, buffer[sent..][0..size]);
         seg.frg = if (!kcp.stream) @as(u32, @intCast(count - i - 1)) else 0;
         try kcp.snd_queue.append(kcp.allocator, seg);
+        segment_owned = false;
         kcp.nsnd_que += 1;
         sent += size;
         len -= size;
@@ -313,18 +327,39 @@ pub fn send(kcp: *Kcp, buffer: []const u8) !usize {
 // move ready segments from rcv_buf to rcv_queue
 //---------------------------------------------------------------------
 fn moveReadySegments(kcp: *Kcp) !void {
-    while (kcp.rcv_buf.items.len > 0) {
-        const seg = &kcp.rcv_buf.items[0];
-        if (seg.sn == kcp.rcv_nxt and kcp.nrcv_que < kcp.rcv_wnd) {
-            const removed_seg = kcp.rcv_buf.orderedRemove(0);
-            try kcp.rcv_queue.append(kcp.allocator, removed_seg);
-            kcp.nrcv_buf -= 1;
-            kcp.nrcv_que += 1;
-            kcp.rcv_nxt += 1;
-        } else {
+    var ready_count: usize = 0;
+    var expected_sn = kcp.rcv_nxt;
+
+    while (ready_count < kcp.rcv_buf.items.len) {
+        if (kcp.nrcv_que + @as(u32, @intCast(ready_count)) >= kcp.rcv_wnd) {
             break;
         }
+
+        const seg = &kcp.rcv_buf.items[ready_count];
+        if (seg.sn != expected_sn) {
+            break;
+        }
+
+        ready_count += 1;
+        expected_sn += 1;
     }
+
+    if (ready_count == 0) {
+        return;
+    }
+
+    try kcp.rcv_queue.ensureTotalCapacity(kcp.allocator, kcp.rcv_queue.items.len + ready_count);
+
+    for (0..ready_count) |idx| {
+        const moved = kcp.rcv_buf.items[idx];
+        kcp.rcv_buf.items[idx] = Segment.init(kcp.allocator);
+        kcp.rcv_queue.appendAssumeCapacity(moved);
+    }
+
+    kcp.rcv_buf.replaceRangeAssumeCapacity(0, ready_count, &.{});
+    kcp.nrcv_buf -= @as(u32, @intCast(ready_count));
+    kcp.nrcv_que += @as(u32, @intCast(ready_count));
+    kcp.rcv_nxt = expected_sn;
 }
 
 //---------------------------------------------------------------------
@@ -336,8 +371,7 @@ fn parseData(kcp: *Kcp, newseg: Segment) !void {
     if (utils.itimediff(sn, kcp.rcv_nxt + kcp.rcv_wnd) >= 0 or
         utils.itimediff(sn, kcp.rcv_nxt) < 0)
     {
-        var seg_to_free = newseg;
-        seg_to_free.deinit();
+        kcp.recycleSegment(newseg);
         return;
     }
 
@@ -364,8 +398,7 @@ fn parseData(kcp: *Kcp, newseg: Segment) !void {
         try kcp.rcv_buf.insert(kcp.allocator, insert_idx, newseg);
         kcp.nrcv_buf += 1;
     } else {
-        var seg_to_free = newseg;
-        seg_to_free.deinit();
+        kcp.recycleSegment(newseg);
     }
 
     // move available data from rcv_buf -> rcv_queue
@@ -439,7 +472,9 @@ pub fn input(kcp: *Kcp, data: []const u8) !i32 {
         const len = result32.value;
         offset = result32.offset;
 
-        if (data.len - offset < len) {
+        const len_usize = @as(usize, @intCast(len));
+
+        if (len > kcp.mtu or data.len - offset < len_usize) {
             return -2;
         }
 
@@ -475,7 +510,9 @@ pub fn input(kcp: *Kcp, data: []const u8) !i32 {
             if (utils.itimediff(sn, kcp.rcv_nxt + kcp.rcv_wnd) < 0) {
                 try control.ackPush(kcp, sn, ts);
                 if (utils.itimediff(sn, kcp.rcv_nxt) >= 0) {
-                    var seg = Segment.init(kcp.allocator);
+                    var seg = kcp.takeSegment();
+                    var segment_owned = true;
+                    errdefer if (segment_owned) kcp.recycleSegment(seg);
                     seg.conv = conv;
                     seg.cmd = cmd;
                     seg.frg = frg;
@@ -485,10 +522,11 @@ pub fn input(kcp: *Kcp, data: []const u8) !i32 {
                     seg.una = una;
 
                     if (len > 0) {
-                        try seg.data.appendSlice(kcp.allocator, data[offset..][0..len]);
+                        try seg.data.appendSlice(kcp.allocator, data[offset..][0..len_usize]);
                     }
 
                     try parseData(kcp, seg);
+                    segment_owned = false;
                 }
             }
         } else if (cmd == types.CMD_WASK) {
@@ -497,7 +535,7 @@ pub fn input(kcp: *Kcp, data: []const u8) !i32 {
             // do nothing
         }
 
-        offset += len;
+        offset += len_usize;
     }
 
     if (flag != 0) {
@@ -549,16 +587,15 @@ pub fn flush(kcp: *Kcp) !void {
     var offset: usize = 0;
 
     // flush acknowledges
-    var i: usize = 0;
-    while (i < kcp.acklist.items.len) : (i += 2) {
+    for (kcp.acklist.items) |ack| {
         if (offset + types.OVERHEAD > kcp.mtu) {
             if (kcp.output) |output_fn| {
                 _ = try output_fn(kcp.buffer[0..offset], kcp, kcp.user);
             }
             offset = 0;
         }
-        seg.sn = kcp.acklist.items[i];
-        seg.ts = kcp.acklist.items[i + 1];
+        seg.sn = ack.sn;
+        seg.ts = ack.ts;
         offset = segment.encode(&seg, kcp.buffer, offset);
     }
     kcp.acklist.clearRetainingCapacity();
@@ -618,13 +655,15 @@ pub fn flush(kcp: *Kcp) !void {
     }
 
     // move data from snd_queue to snd_buf
+    var move_count: usize = 0;
     while (utils.itimediff(kcp.snd_nxt, kcp.snd_una + cwnd) < 0) {
-        if (kcp.snd_queue.items.len == 0) {
+        if (move_count >= kcp.snd_queue.items.len) {
             break;
         }
 
-        var newseg = kcp.snd_queue.orderedRemove(0);
-        kcp.nsnd_que -= 1;
+        var newseg = kcp.snd_queue.items[move_count];
+        kcp.snd_queue.items[move_count] = Segment.init(kcp.allocator);
+        move_count += 1;
 
         newseg.conv = kcp.conv;
         newseg.cmd = types.CMD_PUSH;
@@ -640,6 +679,11 @@ pub fn flush(kcp: *Kcp) !void {
 
         try kcp.snd_buf.append(kcp.allocator, newseg);
         kcp.nsnd_buf += 1;
+    }
+
+    if (move_count > 0) {
+        kcp.snd_queue.replaceRangeAssumeCapacity(0, move_count, &.{});
+        kcp.nsnd_que -= @as(u32, @intCast(move_count));
     }
 
     // calculate resent
@@ -843,6 +887,7 @@ pub fn wndsize(kcp: *Kcp, sndwnd: u32, rcvwnd: u32) void {
     if (rcvwnd > 0) {
         kcp.rcv_wnd = utils.imax(rcvwnd, types.WND_RCV);
     }
+    kcp.refreshSegmentPoolLimit();
 }
 
 pub fn waitsnd(kcp: *const Kcp) u32 {
