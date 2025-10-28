@@ -892,7 +892,7 @@ test "invalid command type" {
 }
 
 // ============================================================================
-// 模糊测试 (Fuzz Testing)
+// Fuzz Testing
 // ============================================================================
 
 test "fuzz random input data" {
@@ -990,7 +990,7 @@ test "fuzz edge case values" {
 }
 
 // ============================================================================
-// 压力测试 (Stress Testing)
+// Stress Testing
 // ============================================================================
 
 test "stress test many small packets" {
@@ -1190,7 +1190,7 @@ test "stress test bidirectional transfer" {
 }
 
 // ============================================================================
-// 边界测试补充 (Boundary Testing)
+// Boundary Testing
 // ============================================================================
 
 test "boundary maximum mtu" {
@@ -1657,7 +1657,7 @@ test "receive window zero notification" {
 }
 
 // ============================================================================
-// RTT 和拥塞控制测试 (RTT and Congestion Control Testing)
+// RTT and Congestion Control Testing
 // ============================================================================
 
 test "rtt calculation accuracy" {
