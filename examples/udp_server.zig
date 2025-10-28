@@ -3,13 +3,13 @@ const kcp = @import("kcp");
 const posix = std.posix;
 const net = std.net;
 
-// 客户端信息
+// Client information
 const Client = struct {
     kcp_inst: *kcp.Kcp,
     username: []u8,
     addr: posix.sockaddr,
     addr_len: posix.socklen_t,
-    last_seen: u32, // 最后活跃时间
+    last_seen: u32, // Last activity timestamp
     allocator: std.mem.Allocator,
 
     fn deinit(self: *Client) void {
@@ -18,13 +18,13 @@ const Client = struct {
     }
 };
 
-// 客户端输出上下文
+// Client output context
 const ClientOutputContext = struct {
     socket: posix.socket_t,
     client: *Client,
 };
 
-// KCP output 回调函数：发送给特定客户端
+// KCP output callback function: send to specific client
 fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     _ = k;
     const ctx = @as(*ClientOutputContext, @ptrCast(@alignCast(user.?)));
@@ -40,32 +40,32 @@ fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     return @intCast(sent);
 }
 
-// 地址比较函数
+// Address comparison function
 fn addrEqual(a: *const posix.sockaddr, b: *const posix.sockaddr) bool {
     const a_in = @as(*const posix.sockaddr.in, @ptrCast(a));
     const b_in = @as(*const posix.sockaddr.in, @ptrCast(b));
     return a_in.port == b_in.port and a_in.addr == b_in.addr;
 }
 
-// 地址哈希函数
+// Address hash function
 fn addrHash(addr: *const posix.sockaddr) u64 {
     const in = @as(*const posix.sockaddr.in, @ptrCast(@alignCast(addr)));
     return @as(u64, in.addr) << 32 | @as(u64, in.port);
 }
 
-// 获取当前时间戳（毫秒）
+// Get current timestamp in milliseconds
 fn getCurrentMs() u32 {
     const ns = std.time.nanoTimestamp();
     return @truncate(@as(u64, @intCast(@divTrunc(ns, 1_000_000))));
 }
 
-// 格式化地址为可读字符串
+// Format address as readable string
 fn formatAddress(addr: *const posix.sockaddr, buf: []u8) ![]const u8 {
     const in = @as(*const posix.sockaddr.in, @ptrCast(@alignCast(addr)));
     const ip_addr = in.addr;
     const port = @byteSwap(in.port);
 
-    // 将 IP 地址转换为点分十进制
+    // Convert IP address to dotted decimal notation
     const a = @as(u8, @truncate(ip_addr & 0xFF));
     const b = @as(u8, @truncate((ip_addr >> 8) & 0xFF));
     const c = @as(u8, @truncate((ip_addr >> 16) & 0xFF));
@@ -90,7 +90,7 @@ pub fn main() !void {
     std.debug.print("\n=== KCP Chat Room Server ===\n", .{});
     std.debug.print("Starting on port {d}...\n", .{port});
 
-    // 创建 UDP socket
+    // Create UDP socket
     const socket = try posix.socket(
         posix.AF.INET,
         posix.SOCK.DGRAM,
@@ -98,14 +98,14 @@ pub fn main() !void {
     );
     defer posix.close(socket);
 
-    // 绑定地址
+    // Bind address
     const addr = net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, port);
     try posix.bind(socket, &addr.any, addr.getOsSockLen());
 
     std.debug.print("Listening on 0.0.0.0:{d}\n", .{port});
     std.debug.print("Waiting for clients to connect...\n\n", .{});
 
-    // 客户端管理
+    // Client management
     var clients = std.AutoHashMap(u64, *Client).init(allocator);
     defer {
         var it = clients.valueIterator();
@@ -121,15 +121,15 @@ pub fn main() !void {
     var kcp_recv_buf: [2048]u8 = undefined;
     var last_update = getCurrentMs();
 
-    const conv: u32 = 1234; // 所有客户端使用相同的 conv
-    const client_timeout_ms: u32 = 600; // 600ms 超时（3 次心跳）
+    const conv: u32 = 1234; // All clients use the same conv
+    const client_timeout_ms: u32 = 600; // 600ms timeout (3 heartbeats)
     var last_timeout_check = getCurrentMs();
 
-    // 主循环
+    // Main loop
     while (true) {
         const current = getCurrentMs();
 
-        // 更新所有客户端的 KCP 状态机
+        // Update KCP state machine for all clients
         var it = clients.valueIterator();
         while (it.next()) |client| {
             if (current >= last_update) {
@@ -137,14 +137,14 @@ pub fn main() !void {
             }
         }
         if (current >= last_update) {
-            last_update = current + 10; // 10ms 更新间隔
+            last_update = current + 10; // 10ms update interval
         }
 
-        // 每 100ms 检查一次超时客户端
+        // Check for timeout clients every 100ms
         if (current - last_timeout_check >= 100) {
             last_timeout_check = current;
 
-            // 收集超时的客户端
+            // Collect timeout clients
             var timeout_keys = std.ArrayList(u64){};
             defer timeout_keys.deinit(allocator);
 
@@ -155,7 +155,7 @@ pub fn main() !void {
                 }
             }
 
-            // 移除超时客户端并通知
+            // Remove timeout clients and notify
             for (timeout_keys.items) |key| {
                 if (clients.get(key)) |client| {
                     const disconnect_msg = try std.fmt.allocPrint(
@@ -167,10 +167,10 @@ pub fn main() !void {
 
                     std.debug.print("{s}\n", .{disconnect_msg});
 
-                    // 先通知其他人，再删除
+                    // Notify others first, then delete
                     try broadcastMessage(&clients, allocator, client, disconnect_msg);
 
-                    // 删除客户端
+                    // Delete client
                     _ = clients.remove(key);
                     client.deinit();
                     allocator.destroy(client);
@@ -178,7 +178,7 @@ pub fn main() !void {
             }
         }
 
-        // 非阻塞接收 UDP 数据
+        // Non-blocking receive UDP data
         var from: posix.sockaddr = undefined;
         var from_len: posix.socklen_t = @sizeOf(posix.sockaddr);
 
@@ -198,21 +198,21 @@ pub fn main() !void {
 
         const from_hash = addrHash(&from);
 
-        // 检查是否是新客户端
+        // Check if this is a new client
         const client = clients.get(from_hash) orelse blk: {
-            // 新客户端，创建并初始化
+            // New client, create and initialize
             const new_client = try allocator.create(Client);
             errdefer allocator.destroy(new_client);
 
-            // 生成用户名
+            // Generate username
             const username = try std.fmt.allocPrint(allocator, "User{d}", .{next_user_id});
             next_user_id += 1;
 
-            // 创建输出上下文
+            // Create output context
             const output_ctx = try allocator.create(ClientOutputContext);
             errdefer allocator.destroy(output_ctx);
 
-            // 创建 KCP 实例
+            // Create KCP instance
             const kcp_inst = try kcp.create(allocator, conv, output_ctx);
             errdefer kcp.release(kcp_inst);
 
@@ -230,7 +230,7 @@ pub fn main() !void {
                 .client = new_client,
             };
 
-            // 设置 KCP
+            // Setup KCP
             kcp.setOutput(kcp_inst, &kcpOutput);
             kcp.setNodelay(kcp_inst, 1, 10, 2, 1);
             kcp.wndsize(kcp_inst, 128, 128);
@@ -241,12 +241,12 @@ pub fn main() !void {
             const addr_str = try formatAddress(&from, &addr_buf);
             std.debug.print("✓ {s} connected from {s}\n", .{ username, addr_str });
 
-            // 通知其他客户端
+            // Notify other clients
             const join_msg = try std.fmt.allocPrint(allocator, "── {s} joined the chat ──", .{username});
             defer allocator.free(join_msg);
             try broadcastMessage(&clients, allocator, null, join_msg);
 
-            // 发送欢迎消息给新客户端
+            // Send welcome message to new client
             const welcome = try std.fmt.allocPrint(allocator, "── Welcome to the chat room! You are {s} ──", .{username});
             defer allocator.free(welcome);
             _ = try kcp.send(kcp_inst, welcome);
@@ -254,13 +254,13 @@ pub fn main() !void {
             break :blk new_client;
         };
 
-        // 更新客户端最后活跃时间
+        // Update client's last activity time
         client.last_seen = current;
 
-        // 将 UDP 数据输入到对应客户端的 KCP
+        // Feed UDP data into corresponding client's KCP
         _ = try kcp.input(client.kcp_inst, recv_buf[0..received]);
 
-        // 尝试从 KCP 接收应用层数据
+        // Try to receive application-layer data from KCP
         while (true) {
             const kcp_len = kcp.recv(client.kcp_inst, &kcp_recv_buf) catch |err| {
                 if (err == error.NoData) break;
@@ -269,13 +269,13 @@ pub fn main() !void {
 
             const msg = kcp_recv_buf[0..@intCast(kcp_len)];
 
-            // 处理消息
+            // Handle message
             try handleClientMessage(&clients, allocator, client, msg);
         }
     }
 }
 
-// 广播消息给所有客户端（除了 exclude）
+// Broadcast message to all clients (except exclude)
 fn broadcastMessage(
     clients: *std.AutoHashMap(u64, *Client),
     allocator: std.mem.Allocator,
@@ -290,30 +290,30 @@ fn broadcastMessage(
     }
 }
 
-// 处理客户端消息
+// Handle client message
 fn handleClientMessage(
     clients: *std.AutoHashMap(u64, *Client),
     allocator: std.mem.Allocator,
     client: *Client,
     message: []const u8,
 ) !void {
-    // 检查是否是系统消息（心跳或初始化）
+    // Check if this is a system message (heartbeat or initialization)
     if (std.mem.eql(u8, message, "__HEARTBEAT__")) {
-        // 心跳消息，只更新 last_seen，不处理
+        // Heartbeat message, only update last_seen, no processing needed
         return;
     }
 
     if (std.mem.eql(u8, message, "__INIT__")) {
-        // 初始化消息，客户端刚连接，不需要特殊处理
-        // last_seen 已经在主循环中更新
+        // Initialization message, client just connected, no special handling needed
+        // last_seen is already updated in main loop
         return;
     }
 
-    // 检查是否是命令
+    // Check if this is a command
     if (std.mem.startsWith(u8, message, "/")) {
         try handleCommand(clients, allocator, client, message);
     } else {
-        // 普通消息，广播给所有其他客户端
+        // Normal message, broadcast to all other clients
         const formatted = try std.fmt.allocPrint(
             allocator,
             "[{s}] {s}",
@@ -326,7 +326,7 @@ fn handleClientMessage(
     }
 }
 
-// 处理命令
+// Handle command
 fn handleCommand(
     clients: *std.AutoHashMap(u64, *Client),
     allocator: std.mem.Allocator,
@@ -342,7 +342,7 @@ fn handleCommand(
             return;
         }
 
-        // 检查用户名是否已被使用
+        // Check if username is already taken
         var it = clients.valueIterator();
         while (it.next()) |c| {
             if (c.* != client and std.mem.eql(u8, c.*.username, new_name)) {
@@ -360,7 +360,7 @@ fn handleCommand(
         );
         defer allocator.free(notification);
 
-        // 更新用户名
+        // Update username
         allocator.free(client.username);
         client.username = try allocator.dupe(u8, new_name);
 
@@ -369,9 +369,9 @@ fn handleCommand(
         return;
     }
 
-    // /quit - 客户端断开连接（客户端会自己关闭，这里只是不报错）
+    // /quit - Client disconnects (client will close itself, just don't throw error)
     if (std.mem.eql(u8, std.mem.trim(u8, cmd, " \t\r\n"), "/quit")) {
-        // 客户端即将断开，不需要发送响应
+        // Client is about to disconnect, no response needed
         return;
     }
 
@@ -395,7 +395,7 @@ fn handleCommand(
         return;
     }
 
-    // 未知命令
+    // Unknown command
     const err_msg = "── Unknown command. Available: /rename <name>, /list, /quit ──";
     _ = try kcp.send(client.kcp_inst, err_msg);
 }
