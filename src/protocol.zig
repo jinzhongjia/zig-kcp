@@ -233,10 +233,7 @@ pub fn recv(kcp: *Kcp, buffer: []u8) !usize {
 
     // remove segments from queue
     if (n > 0) {
-        for (0..n) |i| {
-            const seg_ptr = &kcp.rcv_queue.items[i];
-            const seg_value = seg_ptr.*;
-            seg_ptr.* = Segment.init(kcp.allocator);
+        for (kcp.rcv_queue.items[0..n]) |seg_value| {
             kcp.recycleSegment(seg_value);
         }
         kcp.rcv_queue.replaceRangeAssumeCapacity(0, n, &.{});
@@ -352,11 +349,8 @@ fn moveReadySegments(kcp: *Kcp) !void {
 
     try kcp.rcv_queue.ensureTotalCapacity(kcp.allocator, kcp.rcv_queue.items.len + ready_count);
 
-    for (0..ready_count) |idx| {
-        const moved = kcp.rcv_buf.items[idx];
-        kcp.rcv_buf.items[idx] = Segment.init(kcp.allocator);
-        kcp.rcv_queue.appendAssumeCapacity(moved);
-    }
+    // Move segments without unnecessary initialization
+    kcp.rcv_queue.appendSliceAssumeCapacity(kcp.rcv_buf.items[0..ready_count]);
 
     kcp.rcv_buf.replaceRangeAssumeCapacity(0, ready_count, &.{});
     kcp.nrcv_buf -= @as(u32, @intCast(ready_count));
@@ -664,29 +658,29 @@ pub fn flush(kcp: *Kcp) !void {
         if (move_count >= kcp.snd_queue.items.len) {
             break;
         }
-
-        var newseg = kcp.snd_queue.items[move_count];
-        kcp.snd_queue.items[move_count] = Segment.init(kcp.allocator);
         move_count += 1;
-
-        newseg.conv = kcp.conv;
-        newseg.cmd = types.CMD_PUSH;
-        newseg.wnd = seg.wnd;
-        newseg.ts = kcp.current;
-        newseg.sn = kcp.snd_nxt;
-        kcp.snd_nxt += 1;
-        newseg.una = kcp.rcv_nxt;
-        newseg.resendts = kcp.current;
-        newseg.rto = kcp.rx_rto;
-        newseg.fastack = 0;
-        newseg.xmit = 0;
-
-        try kcp.snd_buf.append(kcp.allocator, newseg);
-        kcp.nsnd_buf += 1;
     }
 
     if (move_count > 0) {
+        try kcp.snd_buf.ensureUnusedCapacity(kcp.allocator, move_count);
+
+        for (kcp.snd_queue.items[0..move_count]) |*newseg| {
+            newseg.conv = kcp.conv;
+            newseg.cmd = types.CMD_PUSH;
+            newseg.wnd = seg.wnd;
+            newseg.ts = kcp.current;
+            newseg.sn = kcp.snd_nxt;
+            kcp.snd_nxt += 1;
+            newseg.una = kcp.rcv_nxt;
+            newseg.resendts = kcp.current;
+            newseg.rto = kcp.rx_rto;
+            newseg.fastack = 0;
+            newseg.xmit = 0;
+        }
+
+        kcp.snd_buf.appendSliceAssumeCapacity(kcp.snd_queue.items[0..move_count]);
         kcp.snd_queue.replaceRangeAssumeCapacity(0, move_count, &.{});
+        kcp.nsnd_buf += @as(u32, @intCast(move_count));
         kcp.nsnd_que -= @as(u32, @intCast(move_count));
     }
 

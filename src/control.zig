@@ -88,10 +88,8 @@ pub fn parseUna(kcp: *Kcp, una: u32) void {
         return;
     }
 
-    for (0..remove_count) |i| {
-        const seg_ptr = &kcp.snd_buf.items[i];
-        const seg_value = seg_ptr.*;
-        seg_ptr.* = Segment.init(kcp.allocator);
+    // Recycle segments without unnecessary initialization
+    for (kcp.snd_buf.items[0..remove_count]) |seg_value| {
         kcp.recycleSegment(seg_value);
     }
     kcp.snd_buf.replaceRangeAssumeCapacity(0, remove_count, &.{});
@@ -106,13 +104,24 @@ pub fn parseFastack(kcp: *Kcp, sn: u32, ts: u32) void {
         return;
     }
 
-    for (kcp.snd_buf.items) |*seg| {
-        if (utils.itimediff(sn, seg.sn) < 0) {
-            break;
-        } else if (sn != seg.sn) {
-            if (utils.itimediff(ts, seg.ts) >= 0) {
-                seg.fastack += 1;
-            }
+    // Binary search to find upper bound (first segment with sn >= target)
+    var left: usize = 0;
+    var right: usize = kcp.snd_buf.items.len;
+
+    while (left < right) {
+        const mid = left + (right - left) / 2;
+        const seg = &kcp.snd_buf.items[mid];
+        if (utils.itimediff(sn, seg.sn) > 0) {
+            left = mid + 1;
+        } else {
+            right = mid;
+        }
+    }
+
+    // Update fastack for all segments before the found position
+    for (kcp.snd_buf.items[0..left]) |*seg| {
+        if (sn != seg.sn and utils.itimediff(ts, seg.ts) >= 0) {
+            seg.fastack += 1;
         }
     }
 }

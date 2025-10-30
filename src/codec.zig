@@ -4,53 +4,45 @@
 //
 //=====================================================================
 
+const std = @import("std");
 const types = @import("types.zig");
 const Segment = types.Segment;
 
 //=====================================================================
 // ENCODE / DECODE
 //=====================================================================
-pub fn encode8u(buf: []u8, offset: usize, c: u8) usize {
+pub inline fn encode8u(buf: []u8, offset: usize, c: u8) usize {
     buf[offset] = c;
     return offset + 1;
 }
 
-pub fn decode8u(buf: []const u8, offset: usize) struct { value: u8, offset: usize } {
+pub inline fn decode8u(buf: []const u8, offset: usize) struct { value: u8, offset: usize } {
     return .{
         .value = buf[offset],
         .offset = offset + 1,
     };
 }
 
-pub fn encode16u(buf: []u8, offset: usize, w: u16) usize {
-    buf[offset] = @as(u8, @truncate(w & 0xff));
-    buf[offset + 1] = @as(u8, @truncate((w >> 8) & 0xff));
+pub inline fn encode16u(buf: []u8, offset: usize, w: u16) usize {
+    std.mem.writeInt(u16, buf[offset..][0..2], w, .little);
     return offset + 2;
 }
 
-pub fn decode16u(buf: []const u8, offset: usize) struct { value: u16, offset: usize } {
-    const w = @as(u16, buf[offset]) | (@as(u16, buf[offset + 1]) << 8);
+pub inline fn decode16u(buf: []const u8, offset: usize) struct { value: u16, offset: usize } {
     return .{
-        .value = w,
+        .value = std.mem.readInt(u16, buf[offset..][0..2], .little),
         .offset = offset + 2,
     };
 }
 
-pub fn encode32u(buf: []u8, offset: usize, l: u32) usize {
-    buf[offset] = @as(u8, @truncate((l >> 0) & 0xff));
-    buf[offset + 1] = @as(u8, @truncate((l >> 8) & 0xff));
-    buf[offset + 2] = @as(u8, @truncate((l >> 16) & 0xff));
-    buf[offset + 3] = @as(u8, @truncate((l >> 24) & 0xff));
+pub inline fn encode32u(buf: []u8, offset: usize, l: u32) usize {
+    std.mem.writeInt(u32, buf[offset..][0..4], l, .little);
     return offset + 4;
 }
 
-pub fn decode32u(buf: []const u8, offset: usize) struct { value: u32, offset: usize } {
-    const l = @as(u32, buf[offset]) |
-        (@as(u32, buf[offset + 1]) << 8) |
-        (@as(u32, buf[offset + 2]) << 16) |
-        (@as(u32, buf[offset + 3]) << 24);
+pub inline fn decode32u(buf: []const u8, offset: usize) struct { value: u32, offset: usize } {
     return .{
-        .value = l,
+        .value = std.mem.readInt(u32, buf[offset..][0..4], .little),
         .offset = offset + 4,
     };
 }
