@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const kcp = @import("kcp.zig");
+const compat = kcp.compat;
 
 // Network packet simulator for delay and packet loss
 const DelayPacket = struct {
@@ -51,7 +52,7 @@ const LatencySimulator = struct {
             .rttmin = rttmin,
             .rttmax = rttmax,
             .current = 0,
-            .prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp())),
+            .prng = std.Random.DefaultPrng.init(@bitCast(compat.currentMsI64())),
         };
     }
 
@@ -193,12 +194,12 @@ fn test_performance(allocator: std.mem.Allocator, mode: u8) !void {
     var recv_buf: [2000]u8 = undefined;
     var send_buf: [8]u8 = undefined;
 
-    const start_time = std.time.milliTimestamp();
+    const start_time = compat.currentMsI64();
 
     // Main test loop
     while (true) {
         // Use simulated time (cache the system call result)
-        const elapsed = std.time.milliTimestamp() - start_time;
+        const elapsed = compat.currentMsI64() - start_time;
         current = @intCast(elapsed & 0xFFFFFFFF);
         vnet.update(@intCast(elapsed));
 
@@ -286,7 +287,7 @@ fn test_performance(allocator: std.mem.Allocator, mode: u8) !void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: compat.DebugAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

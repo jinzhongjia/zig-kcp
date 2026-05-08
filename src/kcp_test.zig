@@ -1410,7 +1410,7 @@ test "dead link with gradually increasing retransmissions" {
     kcp_inst.dead_link = 10;
     kcp.setNodelay(kcp_inst, 1, 20, 0, 0); // No fast resend, only timeout
 
-    var xmit_counts = std.ArrayList(u32){};
+    var xmit_counts: std.ArrayList(u32) = .empty;
     defer xmit_counts.deinit(allocator);
 
     const XmitTracker = struct {

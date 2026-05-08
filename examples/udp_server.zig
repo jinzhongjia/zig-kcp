@@ -1,14 +1,20 @@
 const std = @import("std");
 const kcp = @import("kcp");
-const posix = std.posix;
-const net = std.net;
+const compat = kcp.compat;
+
+const Fd = compat.Fd;
+const sockaddr = compat.sockaddr;
+const socklen_t = compat.socklen_t;
+
+// Default listening port (override via PORT env var if your platform exposes it).
+const default_port: u16 = 9999;
 
 // Client information
 const Client = struct {
     kcp_inst: *kcp.Kcp,
     username: []u8,
-    addr: posix.sockaddr,
-    addr_len: posix.socklen_t,
+    addr: sockaddr,
+    addr_len: socklen_t,
     last_seen: u32, // Last activity timestamp
     allocator: std.mem.Allocator,
 
@@ -20,7 +26,7 @@ const Client = struct {
 
 // Client output context
 const ClientOutputContext = struct {
-    socket: posix.socket_t,
+    socket: Fd,
     client: *Client,
 };
 
@@ -29,10 +35,9 @@ fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     _ = k;
     const ctx = @as(*ClientOutputContext, @ptrCast(@alignCast(user.?)));
 
-    const sent = try posix.sendto(
+    const sent = try compat.sendTo(
         ctx.socket,
         buf,
-        0,
         &ctx.client.addr,
         ctx.client.addr_len,
     );
@@ -40,32 +45,18 @@ fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     return @intCast(sent);
 }
 
-// Address comparison function
-fn addrEqual(a: *const posix.sockaddr, b: *const posix.sockaddr) bool {
-    const a_in = @as(*const posix.sockaddr.in, @ptrCast(a));
-    const b_in = @as(*const posix.sockaddr.in, @ptrCast(b));
-    return a_in.port == b_in.port and a_in.addr == b_in.addr;
-}
-
-// Address hash function
-fn addrHash(addr: *const posix.sockaddr) u64 {
-    const in = @as(*const posix.sockaddr.in, @ptrCast(@alignCast(addr)));
+// Address hash function (sockaddr is reinterpreted as sockaddr.in for INET sockets)
+fn addrHash(addr: *const sockaddr) u64 {
+    const in = @as(*const sockaddr.in, @ptrCast(@alignCast(addr)));
     return @as(u64, in.addr) << 32 | @as(u64, in.port);
 }
 
-// Get current timestamp in milliseconds
-fn getCurrentMs() u32 {
-    const ns = std.time.nanoTimestamp();
-    return @truncate(@as(u64, @intCast(@divTrunc(ns, 1_000_000))));
-}
-
 // Format address as readable string
-fn formatAddress(addr: *const posix.sockaddr, buf: []u8) ![]const u8 {
-    const in = @as(*const posix.sockaddr.in, @ptrCast(@alignCast(addr)));
+fn formatAddress(addr: *const sockaddr, buf: []u8) ![]const u8 {
+    const in = @as(*const sockaddr.in, @ptrCast(@alignCast(addr)));
     const ip_addr = in.addr;
     const port = @byteSwap(in.port);
 
-    // Convert IP address to dotted decimal notation
     const a = @as(u8, @truncate(ip_addr & 0xFF));
     const b = @as(u8, @truncate((ip_addr >> 8) & 0xFF));
     const c = @as(u8, @truncate((ip_addr >> 16) & 0xFF));
@@ -75,32 +66,25 @@ fn formatAddress(addr: *const posix.sockaddr, buf: []u8) ![]const u8 {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: compat.DebugAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    const port: u16 = if (args.len > 1)
-        try std.fmt.parseInt(u16, args[1], 10)
-    else
-        9999;
+    const port: u16 = default_port;
 
     std.debug.print("\n=== KCP Chat Room Server ===\n", .{});
     std.debug.print("Starting on port {d}...\n", .{port});
 
     // Create UDP socket
-    const socket = try posix.socket(
-        posix.AF.INET,
-        posix.SOCK.DGRAM,
-        posix.IPPROTO.UDP,
-    );
-    defer posix.close(socket);
+    const socket = try compat.udpSocket();
+    defer compat.closeFd(socket);
 
-    // Bind address
-    const addr = net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, port);
-    try posix.bind(socket, &addr.any, addr.getOsSockLen());
+    // Bind address (0.0.0.0:port)
+    const bind_addr: sockaddr.in = .{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = 0,
+    };
+    try compat.bindIp4(socket, &bind_addr);
 
     std.debug.print("Listening on 0.0.0.0:{d}\n", .{port});
     std.debug.print("Waiting for clients to connect...\n\n", .{});
@@ -119,15 +103,15 @@ pub fn main() !void {
     var next_user_id: u32 = 1;
     var recv_buf: [2048]u8 = undefined;
     var kcp_recv_buf: [2048]u8 = undefined;
-    var last_update = getCurrentMs();
+    var last_update = compat.currentMs();
 
     const conv: u32 = 1234; // All clients use the same conv
     const client_timeout_ms: u32 = 600; // 600ms timeout (3 heartbeats)
-    var last_timeout_check = getCurrentMs();
+    var last_timeout_check = compat.currentMs();
 
     // Main loop
     while (true) {
-        const current = getCurrentMs();
+        const current = compat.currentMs();
 
         // Update KCP state machine for all clients
         var it = clients.valueIterator();
@@ -145,7 +129,7 @@ pub fn main() !void {
             last_timeout_check = current;
 
             // Collect timeout clients
-            var timeout_keys = std.ArrayList(u64){};
+            var timeout_keys: std.ArrayList(u64) = .empty;
             defer timeout_keys.deinit(allocator);
 
             var timeout_it = clients.iterator();
@@ -179,18 +163,17 @@ pub fn main() !void {
         }
 
         // Non-blocking receive UDP data
-        var from: posix.sockaddr = undefined;
-        var from_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+        var from: sockaddr = undefined;
+        var from_len: socklen_t = @sizeOf(sockaddr);
 
-        const received = posix.recvfrom(
+        const received = compat.recvFromNonblocking(
             socket,
             &recv_buf,
-            posix.MSG.DONTWAIT,
             &from,
             &from_len,
         ) catch |err| {
-            if (err == error.WouldBlock) {
-                std.Thread.sleep(1_000_000); // 1ms
+            if (err == compat.NetError.WouldBlock) {
+                compat.sleepMs(1);
                 continue;
             }
             return err;
@@ -377,7 +360,7 @@ fn handleCommand(
 
     // /list
     if (std.mem.eql(u8, std.mem.trim(u8, cmd, " \t\r\n"), "/list")) {
-        var list_buf = std.ArrayList(u8){};
+        var list_buf: std.ArrayList(u8) = .empty;
         defer list_buf.deinit(allocator);
 
         try list_buf.appendSlice(allocator, "── Online users ──\n");

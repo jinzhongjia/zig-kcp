@@ -1,13 +1,20 @@
 const std = @import("std");
 const kcp = @import("kcp");
-const posix = std.posix;
-const net = std.net;
+const compat = kcp.compat;
+
+const Fd = compat.Fd;
+const sockaddr = compat.sockaddr;
+const socklen_t = compat.socklen_t;
+
+// Default server target. Edit these if your server isn't on localhost:9999.
+const default_host = "127.0.0.1";
+const default_port: u16 = 9999;
 
 // UDP context, used for sending data in KCP output callback
 const UdpContext = struct {
-    socket: posix.socket_t,
-    server_addr: posix.sockaddr,
-    server_len: posix.socklen_t,
+    socket: Fd,
+    server_addr: sockaddr,
+    server_len: socklen_t,
 };
 
 // Message queue for passing user input between threads
@@ -19,13 +26,13 @@ const MessageQueue = struct {
     };
 
     queue: std.ArrayList(Message),
-    mutex: std.Thread.Mutex,
+    mutex: compat.SpinMutex,
     allocator: std.mem.Allocator,
 
     fn init(allocator: std.mem.Allocator) Self {
         return .{
-            .queue = std.ArrayList(Message){},
-            .mutex = std.Thread.Mutex{},
+            .queue = .empty,
+            .mutex = .{},
             .allocator = allocator,
         };
     }
@@ -66,10 +73,9 @@ fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     _ = k;
     const ctx = @as(*UdpContext, @ptrCast(@alignCast(user.?)));
 
-    const sent = try posix.sendto(
+    const sent = try compat.sendTo(
         ctx.socket,
         buf,
-        0,
         &ctx.server_addr,
         ctx.server_len,
     );
@@ -77,44 +83,28 @@ fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     return @intCast(sent);
 }
 
-// Get current timestamp in milliseconds
-fn getCurrentMs() u32 {
-    const ns = std.time.nanoTimestamp();
-    return @truncate(@as(u64, @intCast(@divTrunc(ns, 1_000_000))));
-}
-
 // Input thread function: blocking read from stdin
 fn inputThread(ctx: *InputThreadContext) void {
-    // Use File.read to directly read from stdin
-    const stdin_file = std.fs.File.stdin();
+    const stdin_fd: Fd = compat.STDIN_FILENO;
 
     var line_buffer: [2048]u8 = undefined;
     var line_pos: usize = 0;
 
     while (ctx.running.load(.seq_cst)) {
-        // Read one byte
-        var byte_buf: [1]u8 = undefined;
-        const n = stdin_file.read(&byte_buf) catch |err| {
-            // Only exit on EOF
-            if (err == error.EndOfStream) {
-                std.debug.print("\n[Input thread] Stdin closed (EOF)\n", .{});
+        var byte: u8 = 0;
+        switch (compat.readByte(stdin_fd, &byte)) {
+            .ok => {},
+            .eof => {
+                std.debug.print("\n[Input thread] Stdin EOF\n", .{});
                 ctx.running.store(false, .seq_cst);
                 break;
-            }
-            // Continue on other errors
-            std.debug.print("[Input thread] Read error: {}, continuing...\n", .{err});
-            std.Thread.sleep(100_000_000); // Sleep 100ms and retry
-            continue;
-        };
-
-        if (n == 0) {
-            // EOF
-            std.debug.print("\n[Input thread] Stdin EOF (0 bytes)\n", .{});
-            ctx.running.store(false, .seq_cst);
-            break;
+            },
+            .err => {
+                std.debug.print("[Input thread] Read error, continuing...\n", .{});
+                compat.sleepMs(100);
+                continue;
+            },
         }
-
-        const byte = byte_buf[0];
 
         if (byte == '\n') {
             // Remove \r on Windows
@@ -141,43 +131,28 @@ fn inputThread(ctx: *InputThreadContext) void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: compat.DebugAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    const host = if (args.len > 1) args[1] else "127.0.0.1";
-    const port: u16 = if (args.len > 2)
-        try std.fmt.parseInt(u16, args[2], 10)
-    else
-        9999;
+    const host = default_host;
+    const port: u16 = default_port;
 
     // Create UDP socket
-    const socket = try posix.socket(
-        posix.AF.INET,
-        posix.SOCK.DGRAM,
-        posix.IPPROTO.UDP,
-    );
-    defer posix.close(socket);
+    const socket = try compat.udpSocket();
+    defer compat.closeFd(socket);
 
-    // Resolve server address
-    const addr_list = try net.getAddressList(allocator, host, port);
-    defer addr_list.deinit();
-
-    if (addr_list.addrs.len == 0) {
-        std.debug.print("Failed to resolve host: {s}\n", .{host});
+    // Resolve server address (IPv4 literal only)
+    const server_addr_in = compat.parseIp4(host, port) catch {
+        std.debug.print("Failed to parse host: {s}\n", .{host});
         return error.HostNotFound;
-    }
-
-    const server_addr = addr_list.addrs[0];
+    };
 
     // Initialize UDP context
     var udp_ctx = UdpContext{
         .socket = socket,
-        .server_addr = server_addr.any,
-        .server_len = server_addr.getOsSockLen(),
+        .server_addr = @as(*const sockaddr, @ptrCast(&server_addr_in)).*,
+        .server_len = @sizeOf(sockaddr.in),
     };
 
     // Create KCP instance (conv=1234, must match server)
@@ -201,7 +176,7 @@ pub fn main() !void {
     std.debug.print("  /list        - List all online users\n", .{});
     std.debug.print("  /rename NAME - Change your username\n", .{});
     std.debug.print("  /quit        - Disconnect from chat\n", .{});
-    std.debug.print("\nConnecting to server...\n\n", .{});
+    std.debug.print("\nConnecting to server {s}:{d}...\n\n", .{ host, port });
 
     // Create message queue
     var msg_queue = MessageQueue.init(allocator);
@@ -225,21 +200,21 @@ pub fn main() !void {
 
     var recv_buf: [2048]u8 = undefined;
     var kcp_recv_buf: [2048]u8 = undefined;
-    var last_update = getCurrentMs();
-    var last_heartbeat = getCurrentMs();
+    var last_update = compat.currentMs();
+    var last_heartbeat = compat.currentMs();
 
     // Immediately send initialization packet to let server know we're connected
     _ = try kcp.send(kcp_inst, "__INIT__");
-    try kcp.update(kcp_inst, getCurrentMs());
+    try kcp.update(kcp_inst, compat.currentMs());
 
     // Wait for input thread to start
-    std.Thread.sleep(10_000_000); // 10ms
+    compat.sleepMs(10);
 
     std.debug.print("> ", .{});
 
     // Main loop: handle network I/O and send user messages
     while (running.load(.seq_cst)) {
-        const current = getCurrentMs();
+        const current = compat.currentMs();
 
         // Periodically update KCP state machine
         if (current >= last_update) {
@@ -279,14 +254,8 @@ pub fn main() !void {
         }
 
         // Try to receive data from UDP socket (non-blocking)
-        const received = posix.recvfrom(
-            socket,
-            &recv_buf,
-            posix.MSG.DONTWAIT,
-            null,
-            null,
-        ) catch |err| blk: {
-            if (err != error.WouldBlock) {
+        const received = compat.recvFromNonblocking(socket, &recv_buf, null, null) catch |err| blk: {
+            if (err != compat.NetError.WouldBlock) {
                 return err;
             }
             break :blk 0;
@@ -310,7 +279,7 @@ pub fn main() !void {
         }
 
         // Brief sleep to avoid CPU spinning (1ms)
-        std.Thread.sleep(1_000_000);
+        compat.sleepMs(1);
     }
 
     std.debug.print("\nClient closed.\n", .{});

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const kcp = @import("kcp.zig");
+const compat = kcp.compat;
 const Kcp = kcp.Kcp;
 
 const BenchmarkResult = struct {
@@ -66,7 +67,7 @@ fn buildPacket(
 
 fn benchmarkCreateRelease(allocator: std.mem.Allocator) !BenchmarkResult {
     const iterations: u64 = 10000;
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
 
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
@@ -124,7 +125,7 @@ fn benchmarkSendRecv(allocator: std.mem.Allocator, packet_size: usize) !Benchmar
     const recv_buf = try allocator.alloc(u8, packet_size * 2);
     defer allocator.free(recv_buf);
 
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
 
     var time: u32 = 0;
     var i: u64 = 0;
@@ -163,7 +164,7 @@ fn benchmarkEncodeDecode(allocator: std.mem.Allocator) !BenchmarkResult {
     const iterations: u64 = 1000000;
     var buf: [100]u8 = undefined;
 
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
 
     var i: u64 = 0;
     while (i < iterations) : (i += 1) {
@@ -205,7 +206,7 @@ fn benchmarkUpdate(allocator: std.mem.Allocator) !BenchmarkResult {
 
     kcp.setNodelay(kcp_inst, 1, 10, 2, 1);
 
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
 
     var time: u32 = 0;
     var i: u64 = 0;
@@ -265,7 +266,7 @@ fn benchmarkFragmentation(allocator: std.mem.Allocator) !BenchmarkResult {
     const recv_buf = try allocator.alloc(u8, large_size * 2);
     defer allocator.free(recv_buf);
 
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
 
     var time: u32 = 0;
     var i: u64 = 0;
@@ -338,7 +339,7 @@ fn benchmarkInputReordered(allocator: std.mem.Allocator, segment_count: usize) !
         order[j] = tmp;
     }
 
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
     for (order) |packet_idx| {
         _ = try kcp.input(kcp_inst, packets.items[packet_idx]);
     }
@@ -406,7 +407,7 @@ fn benchmarkInputAckBurst(allocator: std.mem.Allocator, segment_count: usize) !B
     }
 
     const ack_count = packets.items.len;
-    var timer = try std.time.Timer.start();
+    const timer = compat.Timer.start();
     for (packets.items) |pkt| {
         _ = try kcp.input(kcp_inst, pkt);
     }
@@ -430,7 +431,7 @@ fn benchmarkInputAckBurst(allocator: std.mem.Allocator, segment_count: usize) !B
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: compat.DebugAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
