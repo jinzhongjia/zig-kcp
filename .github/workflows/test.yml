@@ -3,21 +3,23 @@ name: Test 🧪
 on:
   push:
     branches:
-      - '**'
+      - main
     paths:
       - '**.zig'
       - 'build.zig'
       - 'build.zig.zon'
       - '.github/workflows/test.yml'
   pull_request:
-    branches:
-      - '**'
     paths:
       - '**.zig'
       - 'build.zig'
       - 'build.zig.zon'
       - '.github/workflows/test.yml'
   workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 run-name: |
   ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }} by @${{ github.actor }}
