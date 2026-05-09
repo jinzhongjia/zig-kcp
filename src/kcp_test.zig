@@ -5,8 +5,10 @@
 //=====================================================================
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const kcp = @import("kcp.zig");
+const compat = kcp.compat;
 
 // Import all needed symbols
 const Kcp = kcp.Kcp;
@@ -2068,4 +2070,196 @@ test "different interval values comparison" {
         // Next update should be influenced by interval
         try testing.expect(next <= interval);
     }
+}
+
+// ---------------------------------------------------------------------
+// compat.zig tests
+//
+// UDP socket helpers on Zig 0.16 currently call std.os.linux.* directly,
+// so syscall round-trips are gated to platforms where they actually work.
+// ---------------------------------------------------------------------
+
+const compat_udp_supported = !compat.is_016 or builtin.os.tag == .linux;
+
+test "compat parseIp4 loopback" {
+    const sa = try compat.parseIp4("127.0.0.1", 8080);
+    // port stored in network byte order
+    try testing.expectEqual(@as(u16, std.mem.nativeToBig(u16, 8080)), sa.port);
+    // 127.0.0.1 in network byte order packs into u32 as 0x0100007F on little-endian hosts
+    const expected: u32 =
+        @as(u32, 127) |
+        (@as(u32, 0) << 8) |
+        (@as(u32, 0) << 16) |
+        (@as(u32, 1) << 24);
+    try testing.expectEqual(expected, sa.addr);
+}
+
+test "compat parseIp4 byte order" {
+    const sa = try compat.parseIp4("1.2.3.4", 0);
+    const expected: u32 =
+        @as(u32, 1) |
+        (@as(u32, 2) << 8) |
+        (@as(u32, 3) << 16) |
+        (@as(u32, 4) << 24);
+    try testing.expectEqual(expected, sa.addr);
+}
+
+test "compat parseIp4 boundary values" {
+    _ = try compat.parseIp4("0.0.0.0", 0);
+    _ = try compat.parseIp4("255.255.255.255", 65535);
+    const max = try compat.parseIp4("255.255.255.255", 65535);
+    try testing.expectEqual(@as(u32, 0xFFFFFFFF), max.addr);
+}
+
+test "compat parseIp4 rejects invalid input" {
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3.4.5", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3.x", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("256.0.0.0", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("1..2.3", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("hello", 0));
+    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3.4.", 0));
+}
+
+test "compat SpinMutex single thread" {
+    var m: compat.SpinMutex = .{};
+    m.lock();
+    m.unlock();
+    m.lock();
+    m.unlock();
+}
+
+test "compat SpinMutex serializes concurrent increments" {
+    const Ctx = struct {
+        mu: compat.SpinMutex = .{},
+        counter: u64 = 0,
+
+        fn worker(self: *@This(), iters: u64) void {
+            var i: u64 = 0;
+            while (i < iters) : (i += 1) {
+                self.mu.lock();
+                self.counter += 1;
+                self.mu.unlock();
+            }
+        }
+    };
+
+    var ctx = Ctx{};
+    const thread_count: u64 = 4;
+    const iters_per_thread: u64 = 5_000;
+
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, Ctx.worker, .{ &ctx, iters_per_thread });
+    }
+    for (threads) |t| t.join();
+
+    try testing.expectEqual(thread_count * iters_per_thread, ctx.counter);
+}
+
+test "compat Timer measures elapsed time" {
+    const t = compat.Timer.start();
+    compat.sleepMs(5);
+    const elapsed_ns = t.read();
+    // Expect at least 1ms — sleep granularity varies across platforms but should
+    // never be zero after a 5ms wait.
+    try testing.expect(elapsed_ns >= std.time.ns_per_ms);
+    // And not absurdly large (10s upper bound is generous against scheduling stalls).
+    try testing.expect(elapsed_ns < 10 * std.time.ns_per_s);
+}
+
+test "compat currentMs is monotonic" {
+    const a = compat.currentMs();
+    compat.sleepMs(2);
+    const b = compat.currentMs();
+    // u32 wraparound is allowed by KCP's timestamp arithmetic, so just check
+    // that two consecutive reads are not wildly out of order.
+    const diff = b -% a;
+    try testing.expect(diff < 10_000); // < 10s
+}
+
+test "compat currentMsI64 matches currentMs low bits" {
+    const i = compat.currentMsI64();
+    const u = compat.currentMs();
+    // Low 32 bits of the i64 reading (interpreted as u64) should equal currentMs
+    // taken at virtually the same moment, modulo a small wall-clock drift.
+    const low: u32 = @truncate(@as(u64, @bitCast(i)));
+    const drift = if (low > u) low -% u else u -% low;
+    try testing.expect(drift < 1000); // < 1s of drift
+}
+
+test "compat udpSocket create and close" {
+    if (!compat_udp_supported) return error.SkipZigTest;
+    const fd = try compat.udpSocket();
+    compat.closeFd(fd);
+}
+
+test "compat bind to loopback succeeds" {
+    if (!compat_udp_supported) return error.SkipZigTest;
+    const fd = try compat.udpSocket();
+    defer compat.closeFd(fd);
+    // port 0 lets the OS auto-assign
+    const addr = try compat.parseIp4("127.0.0.1", 0);
+    try compat.bindIp4(fd, &addr);
+}
+
+test "compat recvFromNonblocking returns WouldBlock when idle" {
+    if (!compat_udp_supported) return error.SkipZigTest;
+    const fd = try compat.udpSocket();
+    defer compat.closeFd(fd);
+    const addr = try compat.parseIp4("127.0.0.1", 0);
+    try compat.bindIp4(fd, &addr);
+
+    var buf: [64]u8 = undefined;
+    const result = compat.recvFromNonblocking(fd, &buf, null, null);
+    try testing.expectError(compat.NetError.WouldBlock, result);
+}
+
+// Try to bind a UDP socket to 127.0.0.1 on some free high port. Returns the
+// port. We avoid getsockname (not available across Zig 0.15/0.16) by sweeping
+// a small range.
+fn bindFreeLoopbackPort(fd: compat.Fd) !u16 {
+    var port: u16 = 47000;
+    while (port < 47500) : (port += 1) {
+        const addr = try compat.parseIp4("127.0.0.1", port);
+        compat.bindIp4(fd, &addr) catch continue;
+        return port;
+    }
+    return error.NoFreePort;
+}
+
+test "compat udp loopback round trip" {
+    if (!compat_udp_supported) return error.SkipZigTest;
+
+    const server_fd = try compat.udpSocket();
+    defer compat.closeFd(server_fd);
+    const server_port = try bindFreeLoopbackPort(server_fd);
+
+    const client_fd = try compat.udpSocket();
+    defer compat.closeFd(client_fd);
+
+    const dest = try compat.parseIp4("127.0.0.1", server_port);
+    const payload = "hello compat";
+    const sent = try compat.sendTo(
+        client_fd,
+        payload,
+        @ptrCast(&dest),
+        @sizeOf(compat.sockaddr.in),
+    );
+    try testing.expectEqual(payload.len, sent);
+
+    // Poll up to ~200ms for the datagram (sched delay safety net).
+    var buf: [128]u8 = undefined;
+    var attempts: u8 = 0;
+    while (attempts < 40) : (attempts += 1) {
+        if (compat.recvFromNonblocking(server_fd, &buf, null, null)) |n| {
+            try testing.expectEqualStrings(payload, buf[0..n]);
+            return;
+        } else |err| if (err != compat.NetError.WouldBlock) {
+            return err;
+        }
+        compat.sleepMs(5);
+    }
+    return error.RecvTimeout;
 }
