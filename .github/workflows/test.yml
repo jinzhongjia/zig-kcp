@@ -1,49 +1,36 @@
 name: Test 🧪
 
 on:
-  schedule:
-    - cron: '0 2 * * *'
+  push:
+    branches:
+      - '**'
+    paths:
+      - '**.zig'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - '**.zig'
+      - 'build.zig'
+      - 'build.zig.zon'
+      - '.github/workflows/test.yml'
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Format Check 📝"]
-    types:
-      - completed
 
-run-name: Test triggered by ${{ github.event_name }} - @${{ github.actor }}
+run-name: |
+  ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }} by @${{ github.actor }}
 
 jobs:
   test:
     name: Test on ${{ matrix.os }} with Zig ${{ matrix.zig-version }}
     runs-on: ${{ matrix.os }}
-    if: |
-      github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' ||
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch'
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         zig-version: [0.15.1, 0.16.0]
-        include:
-          - os: ubuntu-latest
-            zig-version: master
-          - os: macos-latest
-            zig-version: master
-          - os: windows-latest
-            zig-version: master
-        exclude:
-          # Scheduled jobs: only run master, skip pinned versions
-          - os: ${{ github.event_name == 'schedule' && 'ubuntu-latest' || '' }}
-            zig-version: ${{ github.event_name == 'schedule' && '0.15.1' || '' }}
-          - os: ${{ github.event_name == 'schedule' && 'macos-latest' || '' }}
-            zig-version: ${{ github.event_name == 'schedule' && '0.15.1' || '' }}
-          - os: ${{ github.event_name == 'schedule' && 'windows-latest' || '' }}
-            zig-version: ${{ github.event_name == 'schedule' && '0.15.1' || '' }}
-          - os: ${{ github.event_name == 'schedule' && 'ubuntu-latest' || '' }}
-            zig-version: ${{ github.event_name == 'schedule' && '0.16.0' || '' }}
-          - os: ${{ github.event_name == 'schedule' && 'macos-latest' || '' }}
-            zig-version: ${{ github.event_name == 'schedule' && '0.16.0' || '' }}
-          - os: ${{ github.event_name == 'schedule' && 'windows-latest' || '' }}
-            zig-version: ${{ github.event_name == 'schedule' && '0.16.0' || '' }}
     steps:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
