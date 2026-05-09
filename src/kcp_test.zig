@@ -2074,52 +2074,47 @@ test "different interval values comparison" {
 
 // ---------------------------------------------------------------------
 // compat.zig tests
-//
-// UDP socket helpers on Zig 0.16 currently call std.os.linux.* directly,
-// so syscall round-trips are gated to platforms where they actually work.
 // ---------------------------------------------------------------------
 
-const compat_udp_supported = !compat.is_016 or builtin.os.tag == .linux;
-
-test "compat parseIp4 loopback" {
-    const sa = try compat.parseIp4("127.0.0.1", 8080);
-    // port stored in network byte order
-    try testing.expectEqual(@as(u16, std.mem.nativeToBig(u16, 8080)), sa.port);
-    // 127.0.0.1 in network byte order packs into u32 as 0x0100007F on little-endian hosts
-    const expected: u32 =
-        @as(u32, 127) |
-        (@as(u32, 0) << 8) |
-        (@as(u32, 0) << 16) |
-        (@as(u32, 1) << 24);
-    try testing.expectEqual(expected, sa.addr);
+test "compat Address.parseIp4 loopback" {
+    const a = try compat.Address.parseIp4("127.0.0.1", 8080);
+    try testing.expectEqual(@as(u16, 8080), a.port);
+    try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, a.octets);
 }
 
-test "compat parseIp4 byte order" {
-    const sa = try compat.parseIp4("1.2.3.4", 0);
-    const expected: u32 =
-        @as(u32, 1) |
-        (@as(u32, 2) << 8) |
-        (@as(u32, 3) << 16) |
-        (@as(u32, 4) << 24);
-    try testing.expectEqual(expected, sa.addr);
+test "compat Address.parseIp4 byte order" {
+    const a = try compat.Address.parseIp4("1.2.3.4", 0);
+    try testing.expectEqual([4]u8{ 1, 2, 3, 4 }, a.octets);
 }
 
-test "compat parseIp4 boundary values" {
-    _ = try compat.parseIp4("0.0.0.0", 0);
-    _ = try compat.parseIp4("255.255.255.255", 65535);
-    const max = try compat.parseIp4("255.255.255.255", 65535);
-    try testing.expectEqual(@as(u32, 0xFFFFFFFF), max.addr);
+test "compat Address.parseIp4 boundary values" {
+    _ = try compat.Address.parseIp4("0.0.0.0", 0);
+    const max = try compat.Address.parseIp4("255.255.255.255", 65535);
+    try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, max.octets);
+    try testing.expectEqual(@as(u16, 65535), max.port);
 }
 
-test "compat parseIp4 rejects invalid input" {
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3.4.5", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3.x", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("256.0.0.0", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("1..2.3", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("hello", 0));
-    try testing.expectError(error.InvalidAddress, compat.parseIp4("1.2.3.4.", 0));
+test "compat Address.parseIp4 rejects invalid input" {
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3.4.5", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3.x", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("256.0.0.0", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1..2.3", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("hello", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3.4.", 0));
+}
+
+test "compat Address eql / loopback / unspecified" {
+    try testing.expect(compat.Address.loopback(8080).eql(.{ .octets = .{ 127, 0, 0, 1 }, .port = 8080 }));
+    try testing.expect(compat.Address.unspecified(0).eql(.{ .octets = .{ 0, 0, 0, 0 }, .port = 0 }));
+    try testing.expect(!compat.Address.loopback(80).eql(compat.Address.loopback(81)));
+}
+
+test "compat Address.formatBuf" {
+    var buf: [32]u8 = undefined;
+    const s = try compat.Address.loopback(9999).formatBuf(&buf);
+    try testing.expectEqualStrings("127.0.0.1:9999", s);
 }
 
 test "compat SpinMutex single thread" {
@@ -2189,72 +2184,55 @@ test "compat currentMsI64 matches currentMs low bits" {
     try testing.expect(drift < 1000); // < 1s of drift
 }
 
-test "compat udpSocket create and close" {
-    if (!compat_udp_supported) return error.SkipZigTest;
-    const fd = try compat.udpSocket();
-    compat.closeFd(fd);
-}
-
-test "compat bind to loopback succeeds" {
-    if (!compat_udp_supported) return error.SkipZigTest;
-    const fd = try compat.udpSocket();
-    defer compat.closeFd(fd);
-    // port 0 lets the OS auto-assign
-    const addr = try compat.parseIp4("127.0.0.1", 0);
-    try compat.bindIp4(fd, &addr);
-}
-
-test "compat recvFromNonblocking returns WouldBlock when idle" {
-    if (!compat_udp_supported) return error.SkipZigTest;
-    const fd = try compat.udpSocket();
-    defer compat.closeFd(fd);
-    const addr = try compat.parseIp4("127.0.0.1", 0);
-    try compat.bindIp4(fd, &addr);
-
-    var buf: [64]u8 = undefined;
-    const result = compat.recvFromNonblocking(fd, &buf, null, null);
-    try testing.expectError(compat.NetError.WouldBlock, result);
-}
-
-// Try to bind a UDP socket to 127.0.0.1 on some free high port. Returns the
-// port. We avoid getsockname (not available across Zig 0.15/0.16) by sweeping
-// a small range.
-fn bindFreeLoopbackPort(fd: compat.Fd) !u16 {
+// Try to bind a UDP socket to 127.0.0.1 on some free high port. Returns
+// (Socket, port). Avoids getsockname (not portable across Zig 0.15/0.16) by
+// sweeping a small range.
+fn bindFreeLoopbackPort() !struct { compat.Socket, u16 } {
     var port: u16 = 47000;
     while (port < 47500) : (port += 1) {
-        const addr = try compat.parseIp4("127.0.0.1", port);
-        compat.bindIp4(fd, &addr) catch continue;
-        return port;
+        const sock = compat.bindUdp(compat.Address.loopback(port)) catch continue;
+        return .{ sock, port };
     }
     return error.NoFreePort;
 }
 
+test "compat bindUdp loopback succeeds" {
+    var sock = try compat.bindUdp(compat.Address.loopback(0));
+    sock.close();
+}
+
+test "compat recvFromNonblocking returns WouldBlock when idle" {
+    const bound = try bindFreeLoopbackPort();
+    var sock = bound[0];
+    defer sock.close();
+
+    var buf: [64]u8 = undefined;
+    const result = sock.recvFromNonblocking(&buf, null);
+    try testing.expectError(compat.NetError.WouldBlock, result);
+}
+
 test "compat udp loopback round trip" {
-    if (!compat_udp_supported) return error.SkipZigTest;
+    const bound = try bindFreeLoopbackPort();
+    var server = bound[0];
+    const server_port = bound[1];
+    defer server.close();
 
-    const server_fd = try compat.udpSocket();
-    defer compat.closeFd(server_fd);
-    const server_port = try bindFreeLoopbackPort(server_fd);
+    var client = try compat.bindUdp(compat.Address.loopback(0));
+    defer client.close();
 
-    const client_fd = try compat.udpSocket();
-    defer compat.closeFd(client_fd);
-
-    const dest = try compat.parseIp4("127.0.0.1", server_port);
+    const dest = compat.Address.loopback(server_port);
     const payload = "hello compat";
-    const sent = try compat.sendTo(
-        client_fd,
-        payload,
-        @ptrCast(&dest),
-        @sizeOf(compat.sockaddr.in),
-    );
+    const sent = try client.sendTo(payload, dest);
     try testing.expectEqual(payload.len, sent);
 
     // Poll up to ~200ms for the datagram (sched delay safety net).
     var buf: [128]u8 = undefined;
+    var from: compat.Address = undefined;
     var attempts: u8 = 0;
     while (attempts < 40) : (attempts += 1) {
-        if (compat.recvFromNonblocking(server_fd, &buf, null, null)) |n| {
+        if (server.recvFromNonblocking(&buf, &from)) |n| {
             try testing.expectEqualStrings(payload, buf[0..n]);
+            try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, from.octets);
             return;
         } else |err| if (err != compat.NetError.WouldBlock) {
             return err;

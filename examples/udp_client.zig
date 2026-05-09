@@ -2,9 +2,8 @@ const std = @import("std");
 const kcp = @import("kcp");
 const compat = kcp.compat;
 
-const Fd = compat.Fd;
-const sockaddr = compat.sockaddr;
-const socklen_t = compat.socklen_t;
+const Address = compat.Address;
+const Socket = compat.Socket;
 
 // Default server target. Edit these if your server isn't on localhost:9999.
 const default_host = "127.0.0.1";
@@ -12,9 +11,8 @@ const default_port: u16 = 9999;
 
 // UDP context, used for sending data in KCP output callback
 const UdpContext = struct {
-    socket: Fd,
-    server_addr: sockaddr,
-    server_len: socklen_t,
+    socket: *Socket,
+    server_addr: Address,
 };
 
 // Message queue for passing user input between threads
@@ -72,27 +70,18 @@ const InputThreadContext = struct {
 fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     _ = k;
     const ctx = @as(*UdpContext, @ptrCast(@alignCast(user.?)));
-
-    const sent = try compat.sendTo(
-        ctx.socket,
-        buf,
-        &ctx.server_addr,
-        ctx.server_len,
-    );
-
+    const sent = try ctx.socket.sendTo(buf, ctx.server_addr);
     return @intCast(sent);
 }
 
 // Input thread function: blocking read from stdin
 fn inputThread(ctx: *InputThreadContext) void {
-    const stdin_fd: Fd = compat.STDIN_FILENO;
-
     var line_buffer: [2048]u8 = undefined;
     var line_pos: usize = 0;
 
     while (ctx.running.load(.seq_cst)) {
         var byte: u8 = 0;
-        switch (compat.readByte(stdin_fd, &byte)) {
+        switch (compat.readStdinByte(&byte)) {
             .ok => {},
             .eof => {
                 std.debug.print("\n[Input thread] Stdin EOF\n", .{});
@@ -138,21 +127,20 @@ pub fn main() !void {
     const host = default_host;
     const port: u16 = default_port;
 
-    // Create UDP socket
-    const socket = try compat.udpSocket();
-    defer compat.closeFd(socket);
-
     // Resolve server address (IPv4 literal only)
-    const server_addr_in = compat.parseIp4(host, port) catch {
+    const server_addr = Address.parseIp4(host, port) catch {
         std.debug.print("Failed to parse host: {s}\n", .{host});
         return error.HostNotFound;
     };
 
+    // Bind ephemeral local UDP socket
+    var socket = try compat.bindUdp(Address.unspecified(0));
+    defer socket.close();
+
     // Initialize UDP context
     var udp_ctx = UdpContext{
-        .socket = socket,
-        .server_addr = @as(*const sockaddr, @ptrCast(&server_addr_in)).*,
-        .server_len = @sizeOf(sockaddr.in),
+        .socket = &socket,
+        .server_addr = server_addr,
     };
 
     // Create KCP instance (conv=1234, must match server)
@@ -254,7 +242,7 @@ pub fn main() !void {
         }
 
         // Try to receive data from UDP socket (non-blocking)
-        const received = compat.recvFromNonblocking(socket, &recv_buf, null, null) catch |err| blk: {
+        const received = socket.recvFromNonblocking(&recv_buf, null) catch |err| blk: {
             if (err != compat.NetError.WouldBlock) {
                 return err;
             }

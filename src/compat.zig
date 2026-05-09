@@ -2,8 +2,9 @@
 //
 // compat.zig - Compatibility shims for Zig 0.15 and 0.16
 //
-// Centralises every API that differs between the two versions so the
-// rest of the codebase can stay version-agnostic.
+// Centralises every API that differs between the two versions and exposes
+// a small platform-neutral UDP layer (Linux + macOS + Windows) so the rest
+// of the codebase can stay version- and OS-agnostic.
 //
 //=====================================================================
 
@@ -78,16 +79,64 @@ pub const Timer = struct {
 };
 
 //---------------------------------------------------------------------
-// UDP socket helpers (raw syscalls on 0.16, std.posix on 0.15)
+// Lazy single-threaded Io (0.16 only). Cheap: no syscall on 0.15.
 //---------------------------------------------------------------------
-pub const Fd = std.posix.fd_t;
-pub const sockaddr = std.posix.sockaddr;
-pub const socklen_t = std.posix.socklen_t;
-pub const AF = std.posix.AF;
-pub const SOCK = std.posix.SOCK;
-pub const IPPROTO = std.posix.IPPROTO;
-pub const MSG = std.posix.MSG;
+fn ioInstance() if (is_016) std.Io else void {
+    if (comptime !is_016) return {};
+    return std.Io.Threaded.global_single_threaded.io();
+}
 
+//---------------------------------------------------------------------
+// IPv4 address abstraction. Storage matches network order so hashing and
+// equality are cheap, and conversion to/from version-specific types is a
+// straight field copy.
+//---------------------------------------------------------------------
+pub const Address = struct {
+    /// Octets in network order: octets[0..4] = a.b.c.d for "a.b.c.d".
+    octets: [4]u8,
+    /// Port in host byte order.
+    port: u16,
+
+    pub const ParseError = error{InvalidAddress};
+
+    pub fn parseIp4(text: []const u8, port: u16) ParseError!Address {
+        var octets: [4]u8 = undefined;
+        var idx: usize = 0;
+        var iter = std.mem.splitScalar(u8, text, '.');
+        while (iter.next()) |part| {
+            if (idx >= 4) return error.InvalidAddress;
+            octets[idx] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidAddress;
+            idx += 1;
+        }
+        if (idx != 4) return error.InvalidAddress;
+        return .{ .octets = octets, .port = port };
+    }
+
+    pub fn loopback(port: u16) Address {
+        return .{ .octets = .{ 127, 0, 0, 1 }, .port = port };
+    }
+
+    pub fn unspecified(port: u16) Address {
+        return .{ .octets = .{ 0, 0, 0, 0 }, .port = port };
+    }
+
+    pub fn eql(a: Address, b: Address) bool {
+        return a.port == b.port and std.mem.eql(u8, &a.octets, &b.octets);
+    }
+
+    pub fn formatBuf(a: Address, buf: []u8) ![]const u8 {
+        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{
+            a.octets[0], a.octets[1], a.octets[2], a.octets[3], a.port,
+        });
+    }
+};
+
+//---------------------------------------------------------------------
+// Cross-platform UDP socket
+//
+// 0.15 → std.posix (Linux/macOS/Windows via stdlib's POSIX shim).
+// 0.16 → std.Io.net.Socket (Linux epoll, macOS kqueue, Windows IOCP).
+//---------------------------------------------------------------------
 pub const NetError = error{
     SocketFailed,
     BindFailed,
@@ -97,123 +146,141 @@ pub const NetError = error{
     Unexpected,
 };
 
-pub fn udpSocket() !Fd {
+pub const Socket = struct {
+    impl: Impl,
+
+    const Impl = if (is_016) std.Io.net.Socket else std.posix.fd_t;
+
+    pub fn close(self: *Socket) void {
+        if (comptime is_016) {
+            self.impl.close(ioInstance());
+        } else {
+            std.posix.close(self.impl);
+        }
+    }
+
+    pub fn sendTo(self: *Socket, buf: []const u8, dest: Address) NetError!usize {
+        if (comptime is_016) {
+            const ip = std.Io.net.IpAddress{ .ip4 = .{ .bytes = dest.octets, .port = dest.port } };
+            self.impl.send(ioInstance(), &ip, buf) catch return NetError.SendFailed;
+            return buf.len;
+        } else {
+            const sa = sockaddrFromAddress(dest);
+            return std.posix.sendto(
+                self.impl,
+                buf,
+                0,
+                @ptrCast(&sa),
+                @sizeOf(std.posix.sockaddr.in),
+            ) catch return NetError.SendFailed;
+        }
+    }
+
+    pub fn recvFromNonblocking(
+        self: *Socket,
+        buf: []u8,
+        from_out: ?*Address,
+    ) NetError!usize {
+        if (comptime is_016) {
+            const io = ioInstance();
+            const zero: std.Io.Clock.Duration = .{
+                .raw = .fromNanoseconds(0),
+                .clock = .awake,
+            };
+            const msg = self.impl.receiveTimeout(io, buf, .{ .duration = zero }) catch |err| switch (err) {
+                error.Timeout => return NetError.WouldBlock,
+                else => return NetError.RecvFailed,
+            };
+            if (from_out) |out| {
+                out.* = switch (msg.from) {
+                    .ip4 => |ip| .{ .octets = ip.bytes, .port = ip.port },
+                    .ip6 => return NetError.RecvFailed,
+                };
+            }
+            return msg.data.len;
+        } else {
+            var sa: std.posix.sockaddr.in = undefined;
+            var sa_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.in);
+            const n = std.posix.recvfrom(
+                self.impl,
+                buf,
+                std.posix.MSG.DONTWAIT,
+                @ptrCast(&sa),
+                &sa_len,
+            ) catch |err| {
+                if (err == error.WouldBlock) return NetError.WouldBlock;
+                return NetError.RecvFailed;
+            };
+            if (from_out) |out| out.* = addressFromSockaddr(sa);
+            return n;
+        }
+    }
+};
+
+pub fn bindUdp(addr: Address) NetError!Socket {
     if (comptime is_016) {
-        const linux = std.os.linux;
-        const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM, linux.IPPROTO.UDP);
-        return switch (linux.errno(rc)) {
-            .SUCCESS => @intCast(rc),
-            else => NetError.SocketFailed,
-        };
+        const ip = std.Io.net.IpAddress{ .ip4 = .{ .bytes = addr.octets, .port = addr.port } };
+        const sock = ip.bind(ioInstance(), .{ .mode = .dgram }) catch return NetError.BindFailed;
+        return .{ .impl = sock };
     } else {
-        return std.posix.socket(AF.INET, SOCK.DGRAM, IPPROTO.UDP) catch return NetError.SocketFailed;
+        const fd = std.posix.socket(
+            std.posix.AF.INET,
+            std.posix.SOCK.DGRAM,
+            std.posix.IPPROTO.UDP,
+        ) catch return NetError.SocketFailed;
+        errdefer std.posix.close(fd);
+
+        const sa = sockaddrFromAddress(addr);
+        std.posix.bind(fd, @ptrCast(&sa), @sizeOf(std.posix.sockaddr.in)) catch return NetError.BindFailed;
+        return .{ .impl = fd };
     }
 }
 
-pub fn closeFd(fd: Fd) void {
-    if (comptime is_016) {
-        _ = std.os.linux.close(fd);
-    } else {
-        std.posix.close(fd);
-    }
+// 0.15-only conversions: kept private so the rest of the codebase never
+// touches version-specific socket types directly.
+fn sockaddrFromAddress(a: Address) std.posix.sockaddr.in {
+    if (comptime is_016) @compileError("sockaddrFromAddress unused on 0.16");
+    return .{
+        .port = std.mem.nativeToBig(u16, a.port),
+        .addr = @bitCast(a.octets),
+    };
 }
 
-pub fn bindIp4(fd: Fd, addr_in: *const sockaddr.in) !void {
-    if (comptime is_016) {
-        const rc = std.os.linux.bind(fd, @ptrCast(addr_in), @sizeOf(sockaddr.in));
-        if (std.os.linux.errno(rc) != .SUCCESS) return NetError.BindFailed;
-    } else {
-        std.posix.bind(fd, @ptrCast(addr_in), @sizeOf(sockaddr.in)) catch return NetError.BindFailed;
-    }
-}
-
-pub fn sendTo(fd: Fd, buf: []const u8, addr: *const sockaddr, addr_len: socklen_t) !usize {
-    if (comptime is_016) {
-        const linux = std.os.linux;
-        const rc = linux.sendto(fd, buf.ptr, buf.len, 0, addr, addr_len);
-        return switch (linux.errno(rc)) {
-            .SUCCESS => rc,
-            else => NetError.SendFailed,
-        };
-    } else {
-        return std.posix.sendto(fd, buf, 0, addr, addr_len) catch return NetError.SendFailed;
-    }
-}
-
-pub fn recvFromNonblocking(
-    fd: Fd,
-    buf: []u8,
-    addr: ?*sockaddr,
-    addr_len: ?*socklen_t,
-) !usize {
-    if (comptime is_016) {
-        const linux = std.os.linux;
-        const rc = linux.recvfrom(fd, buf.ptr, buf.len, linux.MSG.DONTWAIT, addr, addr_len);
-        return switch (linux.errno(rc)) {
-            .SUCCESS => rc,
-            .AGAIN => NetError.WouldBlock,
-            else => NetError.RecvFailed,
-        };
-    } else {
-        return std.posix.recvfrom(fd, buf, MSG.DONTWAIT, addr, addr_len) catch |err| {
-            if (err == error.WouldBlock) return NetError.WouldBlock;
-            return NetError.RecvFailed;
-        };
-    }
+fn addressFromSockaddr(sa: std.posix.sockaddr.in) Address {
+    if (comptime is_016) @compileError("addressFromSockaddr unused on 0.16");
+    const octets: [4]u8 = @bitCast(sa.addr);
+    return .{ .octets = octets, .port = std.mem.bigToNative(u16, sa.port) };
 }
 
 //---------------------------------------------------------------------
-// Read one byte from a file descriptor (used for blocking stdin reads)
+// Stdin: small blocking single-byte reader. Only used by the chat client.
+//
+// 0.15 → std.posix.read on STDIN_FILENO (cross-platform via stdlib's POSIX
+//        shim, including the Windows HANDLE wrapper).
+// 0.16 → std.Io.File.stdin().readStreaming (cross-platform, including
+//        Windows IOCP). STDIN_FILENO is not exposed because its type
+//        differs from fd_t on Windows under 0.16.
 //---------------------------------------------------------------------
 pub const ReadResult = enum { ok, eof, err };
 
-pub fn readByte(fd: Fd, byte_out: *u8) ReadResult {
+pub fn readStdinByte(byte_out: *u8) ReadResult {
     if (comptime is_016) {
-        const linux = std.os.linux;
-        const rc = linux.read(fd, @ptrCast(byte_out), 1);
-        return switch (linux.errno(rc)) {
-            .SUCCESS => if (rc == 0) .eof else .ok,
-            else => .err,
-        };
+        const io = ioInstance();
+        const stdin = std.Io.File.stdin();
+        const buf: []u8 = @as(*[1]u8, @ptrCast(byte_out))[0..];
+        const n = stdin.readStreaming(io, &.{buf}) catch return .err;
+        return if (n == 0) .eof else .ok;
     } else {
-        const n = std.posix.read(fd, @as(*[1]u8, @ptrCast(byte_out))[0..]) catch return .err;
+        const n = std.posix.read(std.posix.STDIN_FILENO, @as(*[1]u8, @ptrCast(byte_out))[0..]) catch return .err;
         return if (n == 0) .eof else .ok;
     }
-}
-
-pub const STDIN_FILENO: Fd = if (is_016) std.os.linux.STDIN_FILENO else std.posix.STDIN_FILENO;
-
-//---------------------------------------------------------------------
-// IPv4 dotted-decimal parser, version-agnostic.
-//---------------------------------------------------------------------
-pub fn parseIp4(host: []const u8, port: u16) !sockaddr.in {
-    var octets: [4]u8 = undefined;
-    var idx: usize = 0;
-    var iter = std.mem.splitScalar(u8, host, '.');
-    while (iter.next()) |part| {
-        if (idx >= 4) return error.InvalidAddress;
-        octets[idx] = std.fmt.parseInt(u8, part, 10) catch return error.InvalidAddress;
-        idx += 1;
-    }
-    if (idx != 4) return error.InvalidAddress;
-
-    const addr_be: u32 =
-        (@as(u32, octets[0])) |
-        (@as(u32, octets[1]) << 8) |
-        (@as(u32, octets[2]) << 16) |
-        (@as(u32, octets[3]) << 24);
-
-    return .{
-        .port = std.mem.nativeToBig(u16, port),
-        .addr = addr_be,
-    };
 }
 
 //---------------------------------------------------------------------
 // Lock-free mutex for simple producer/consumer (works on both versions)
 //---------------------------------------------------------------------
 pub const SpinMutex = struct {
-    state: std.atomic.Value(u8) = .{ .raw = 0 },
+    state: std.atomic.Value(u8) = .init(0),
 
     pub fn lock(self: *SpinMutex) void {
         while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
