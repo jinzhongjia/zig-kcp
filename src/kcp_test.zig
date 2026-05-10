@@ -5,8 +5,10 @@
 //=====================================================================
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const kcp = @import("kcp.zig");
+const compat = kcp.compat;
 
 // Import all needed symbols
 const Kcp = kcp.Kcp;
@@ -1410,7 +1412,7 @@ test "dead link with gradually increasing retransmissions" {
     kcp_inst.dead_link = 10;
     kcp.setNodelay(kcp_inst, 1, 20, 0, 0); // No fast resend, only timeout
 
-    var xmit_counts = std.ArrayList(u32){};
+    var xmit_counts: std.ArrayList(u32) = .empty;
     defer xmit_counts.deinit(allocator);
 
     const XmitTracker = struct {
@@ -2068,4 +2070,174 @@ test "different interval values comparison" {
         // Next update should be influenced by interval
         try testing.expect(next <= interval);
     }
+}
+
+// ---------------------------------------------------------------------
+// compat.zig tests
+// ---------------------------------------------------------------------
+
+test "compat Address.parseIp4 loopback" {
+    const a = try compat.Address.parseIp4("127.0.0.1", 8080);
+    try testing.expectEqual(@as(u16, 8080), a.port);
+    try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, a.octets);
+}
+
+test "compat Address.parseIp4 byte order" {
+    const a = try compat.Address.parseIp4("1.2.3.4", 0);
+    try testing.expectEqual([4]u8{ 1, 2, 3, 4 }, a.octets);
+}
+
+test "compat Address.parseIp4 boundary values" {
+    _ = try compat.Address.parseIp4("0.0.0.0", 0);
+    const max = try compat.Address.parseIp4("255.255.255.255", 65535);
+    try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, max.octets);
+    try testing.expectEqual(@as(u16, 65535), max.port);
+}
+
+test "compat Address.parseIp4 rejects invalid input" {
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3.4.5", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3.x", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("256.0.0.0", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1..2.3", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("hello", 0));
+    try testing.expectError(error.InvalidAddress, compat.Address.parseIp4("1.2.3.4.", 0));
+}
+
+test "compat Address eql / loopback / unspecified" {
+    try testing.expect(compat.Address.loopback(8080).eql(.{ .octets = .{ 127, 0, 0, 1 }, .port = 8080 }));
+    try testing.expect(compat.Address.unspecified(0).eql(.{ .octets = .{ 0, 0, 0, 0 }, .port = 0 }));
+    try testing.expect(!compat.Address.loopback(80).eql(compat.Address.loopback(81)));
+}
+
+test "compat Address.formatBuf" {
+    var buf: [32]u8 = undefined;
+    const s = try compat.Address.loopback(9999).formatBuf(&buf);
+    try testing.expectEqualStrings("127.0.0.1:9999", s);
+}
+
+test "compat SpinMutex single thread" {
+    var m: compat.SpinMutex = .{};
+    m.lock();
+    m.unlock();
+    m.lock();
+    m.unlock();
+}
+
+test "compat SpinMutex serializes concurrent increments" {
+    const Ctx = struct {
+        mu: compat.SpinMutex = .{},
+        counter: u64 = 0,
+
+        fn worker(self: *@This(), iters: u64) void {
+            var i: u64 = 0;
+            while (i < iters) : (i += 1) {
+                self.mu.lock();
+                self.counter += 1;
+                self.mu.unlock();
+            }
+        }
+    };
+
+    var ctx = Ctx{};
+    const thread_count: u64 = 4;
+    const iters_per_thread: u64 = 5_000;
+
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, Ctx.worker, .{ &ctx, iters_per_thread });
+    }
+    for (threads) |t| t.join();
+
+    try testing.expectEqual(thread_count * iters_per_thread, ctx.counter);
+}
+
+test "compat Timer measures elapsed time" {
+    const t = compat.Timer.start();
+    compat.sleepMs(5);
+    const elapsed_ns = t.read();
+    // Expect at least 1ms — sleep granularity varies across platforms but should
+    // never be zero after a 5ms wait.
+    try testing.expect(elapsed_ns >= std.time.ns_per_ms);
+    // And not absurdly large (10s upper bound is generous against scheduling stalls).
+    try testing.expect(elapsed_ns < 10 * std.time.ns_per_s);
+}
+
+test "compat currentMs is monotonic" {
+    const a = compat.currentMs();
+    compat.sleepMs(2);
+    const b = compat.currentMs();
+    // u32 wraparound is allowed by KCP's timestamp arithmetic, so just check
+    // that two consecutive reads are not wildly out of order.
+    const diff = b -% a;
+    try testing.expect(diff < 10_000); // < 10s
+}
+
+test "compat currentMsI64 matches currentMs low bits" {
+    const i = compat.currentMsI64();
+    const u = compat.currentMs();
+    // Low 32 bits of the i64 reading (interpreted as u64) should equal currentMs
+    // taken at virtually the same moment, modulo a small wall-clock drift.
+    const low: u32 = @truncate(@as(u64, @bitCast(i)));
+    const drift = if (low > u) low -% u else u -% low;
+    try testing.expect(drift < 1000); // < 1s of drift
+}
+
+// Try to bind a UDP socket to 127.0.0.1 on some free high port. Returns
+// (Socket, port). Avoids getsockname (not portable across Zig 0.15/0.16) by
+// sweeping a small range.
+fn bindFreeLoopbackPort() !struct { compat.Socket, u16 } {
+    var port: u16 = 47000;
+    while (port < 47500) : (port += 1) {
+        const sock = compat.bindUdp(compat.Address.loopback(port)) catch continue;
+        return .{ sock, port };
+    }
+    return error.NoFreePort;
+}
+
+test "compat bindUdp loopback succeeds" {
+    var sock = try compat.bindUdp(compat.Address.loopback(0));
+    sock.close();
+}
+
+test "compat recvFromNonblocking returns WouldBlock when idle" {
+    const bound = try bindFreeLoopbackPort();
+    var sock = bound[0];
+    defer sock.close();
+
+    var buf: [64]u8 = undefined;
+    const result = sock.recvFromNonblocking(&buf, null);
+    try testing.expectError(compat.NetError.WouldBlock, result);
+}
+
+test "compat udp loopback round trip" {
+    const bound = try bindFreeLoopbackPort();
+    var server = bound[0];
+    const server_port = bound[1];
+    defer server.close();
+
+    var client = try compat.bindUdp(compat.Address.loopback(0));
+    defer client.close();
+
+    const dest = compat.Address.loopback(server_port);
+    const payload = "hello compat";
+    const sent = try client.sendTo(payload, dest);
+    try testing.expectEqual(payload.len, sent);
+
+    // Poll up to ~200ms for the datagram (sched delay safety net).
+    var buf: [128]u8 = undefined;
+    var from: compat.Address = undefined;
+    var attempts: u8 = 0;
+    while (attempts < 40) : (attempts += 1) {
+        if (server.recvFromNonblocking(&buf, &from)) |n| {
+            try testing.expectEqualStrings(payload, buf[0..n]);
+            try testing.expectEqual([4]u8{ 127, 0, 0, 1 }, from.octets);
+            return;
+        } else |err| if (err != compat.NetError.WouldBlock) {
+            return err;
+        }
+        compat.sleepMs(5);
+    }
+    return error.RecvTimeout;
 }

@@ -3,17 +3,19 @@ name: Format Check 📝
 on:
   push:
     branches:
-      - '**'
+      - main
     paths:
       - '**.zig'
       - '.github/workflows/format-check.yml'
   pull_request:
-    branches:
-      - '**'
     paths:
       - '**.zig'
       - '.github/workflows/format-check.yml'
   workflow_dispatch:
+
+concurrency:
+  group: format-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 run-name: |
   ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || github.ref_name }} by @${{ github.actor }}
@@ -24,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.15.1
 

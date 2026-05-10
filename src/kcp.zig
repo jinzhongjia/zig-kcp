@@ -21,6 +21,7 @@ pub const codec = @import("codec.zig");
 pub const segment = @import("segment.zig");
 pub const control = @import("control.zig");
 pub const protocol = @import("protocol.zig");
+pub const compat = @import("compat.zig");
 
 // Export types
 pub const Kcp = types.Kcp;

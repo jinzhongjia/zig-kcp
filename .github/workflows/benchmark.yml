@@ -19,10 +19,10 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        zig-version: [0.15.1, master]
+        zig-version: [0.15.1, 0.16.0, master]
     steps:
       - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
           version: ${{ matrix.zig-version }}
 

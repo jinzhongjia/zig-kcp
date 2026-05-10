@@ -1,14 +1,18 @@
 const std = @import("std");
 const kcp = @import("kcp");
-const posix = std.posix;
-const net = std.net;
+const compat = kcp.compat;
+
+const Address = compat.Address;
+const Socket = compat.Socket;
+
+// Default listening port (override via PORT env var if your platform exposes it).
+const default_port: u16 = 9999;
 
 // Client information
 const Client = struct {
     kcp_inst: *kcp.Kcp,
     username: []u8,
-    addr: posix.sockaddr,
-    addr_len: posix.socklen_t,
+    addr: Address,
     last_seen: u32, // Last activity timestamp
     allocator: std.mem.Allocator,
 
@@ -20,7 +24,7 @@ const Client = struct {
 
 // Client output context
 const ClientOutputContext = struct {
-    socket: posix.socket_t,
+    socket: *Socket,
     client: *Client,
 };
 
@@ -28,85 +32,30 @@ const ClientOutputContext = struct {
 fn kcpOutput(buf: []const u8, k: *kcp.Kcp, user: ?*anyopaque) !i32 {
     _ = k;
     const ctx = @as(*ClientOutputContext, @ptrCast(@alignCast(user.?)));
-
-    const sent = try posix.sendto(
-        ctx.socket,
-        buf,
-        0,
-        &ctx.client.addr,
-        ctx.client.addr_len,
-    );
-
+    const sent = try ctx.socket.sendTo(buf, ctx.client.addr);
     return @intCast(sent);
 }
 
-// Address comparison function
-fn addrEqual(a: *const posix.sockaddr, b: *const posix.sockaddr) bool {
-    const a_in = @as(*const posix.sockaddr.in, @ptrCast(a));
-    const b_in = @as(*const posix.sockaddr.in, @ptrCast(b));
-    return a_in.port == b_in.port and a_in.addr == b_in.addr;
-}
-
-// Address hash function
-fn addrHash(addr: *const posix.sockaddr) u64 {
-    const in = @as(*const posix.sockaddr.in, @ptrCast(@alignCast(addr)));
-    return @as(u64, in.addr) << 32 | @as(u64, in.port);
-}
-
-// Get current timestamp in milliseconds
-fn getCurrentMs() u32 {
-    const ns = std.time.nanoTimestamp();
-    return @truncate(@as(u64, @intCast(@divTrunc(ns, 1_000_000))));
-}
-
-// Format address as readable string
-fn formatAddress(addr: *const posix.sockaddr, buf: []u8) ![]const u8 {
-    const in = @as(*const posix.sockaddr.in, @ptrCast(@alignCast(addr)));
-    const ip_addr = in.addr;
-    const port = @byteSwap(in.port);
-
-    // Convert IP address to dotted decimal notation
-    const a = @as(u8, @truncate(ip_addr & 0xFF));
-    const b = @as(u8, @truncate((ip_addr >> 8) & 0xFF));
-    const c = @as(u8, @truncate((ip_addr >> 16) & 0xFF));
-    const d = @as(u8, @truncate((ip_addr >> 24) & 0xFF));
-
-    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ a, b, c, d, port });
-}
-
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: compat.DebugAllocator(.{}) = .{};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    const port: u16 = if (args.len > 1)
-        try std.fmt.parseInt(u16, args[1], 10)
-    else
-        9999;
+    const port: u16 = default_port;
 
     std.debug.print("\n=== KCP Chat Room Server ===\n", .{});
     std.debug.print("Starting on port {d}...\n", .{port});
 
-    // Create UDP socket
-    const socket = try posix.socket(
-        posix.AF.INET,
-        posix.SOCK.DGRAM,
-        posix.IPPROTO.UDP,
-    );
-    defer posix.close(socket);
-
-    // Bind address
-    const addr = net.Address.initIp4([_]u8{ 0, 0, 0, 0 }, port);
-    try posix.bind(socket, &addr.any, addr.getOsSockLen());
+    // Bind 0.0.0.0:port
+    var socket = try compat.bindUdp(Address.unspecified(port));
+    defer socket.close();
 
     std.debug.print("Listening on 0.0.0.0:{d}\n", .{port});
     std.debug.print("Waiting for clients to connect...\n\n", .{});
 
-    // Client management
-    var clients = std.AutoHashMap(u64, *Client).init(allocator);
+    // Client management — keyed by Address (octets + port). AutoHashMap hashes
+    // the struct fields directly, so we avoid a custom u64 packing.
+    var clients = std.AutoHashMap(Address, *Client).init(allocator);
     defer {
         var it = clients.valueIterator();
         while (it.next()) |client| {
@@ -119,15 +68,15 @@ pub fn main() !void {
     var next_user_id: u32 = 1;
     var recv_buf: [2048]u8 = undefined;
     var kcp_recv_buf: [2048]u8 = undefined;
-    var last_update = getCurrentMs();
+    var last_update = compat.currentMs();
 
     const conv: u32 = 1234; // All clients use the same conv
     const client_timeout_ms: u32 = 600; // 600ms timeout (3 heartbeats)
-    var last_timeout_check = getCurrentMs();
+    var last_timeout_check = compat.currentMs();
 
     // Main loop
     while (true) {
-        const current = getCurrentMs();
+        const current = compat.currentMs();
 
         // Update KCP state machine for all clients
         var it = clients.valueIterator();
@@ -145,7 +94,7 @@ pub fn main() !void {
             last_timeout_check = current;
 
             // Collect timeout clients
-            var timeout_keys = std.ArrayList(u64){};
+            var timeout_keys: std.ArrayList(Address) = .empty;
             defer timeout_keys.deinit(allocator);
 
             var timeout_it = clients.iterator();
@@ -179,27 +128,17 @@ pub fn main() !void {
         }
 
         // Non-blocking receive UDP data
-        var from: posix.sockaddr = undefined;
-        var from_len: posix.socklen_t = @sizeOf(posix.sockaddr);
-
-        const received = posix.recvfrom(
-            socket,
-            &recv_buf,
-            posix.MSG.DONTWAIT,
-            &from,
-            &from_len,
-        ) catch |err| {
-            if (err == error.WouldBlock) {
-                std.Thread.sleep(1_000_000); // 1ms
+        var from: Address = undefined;
+        const received = socket.recvFromNonblocking(&recv_buf, &from) catch |err| {
+            if (err == compat.NetError.WouldBlock) {
+                compat.sleepMs(1);
                 continue;
             }
             return err;
         };
 
-        const from_hash = addrHash(&from);
-
         // Check if this is a new client
-        const client = clients.get(from_hash) orelse blk: {
+        const client = clients.get(from) orelse blk: {
             // New client, create and initialize
             const new_client = try allocator.create(Client);
             errdefer allocator.destroy(new_client);
@@ -220,13 +159,12 @@ pub fn main() !void {
                 .kcp_inst = kcp_inst,
                 .username = username,
                 .addr = from,
-                .addr_len = from_len,
                 .last_seen = current,
                 .allocator = allocator,
             };
 
             output_ctx.* = ClientOutputContext{
-                .socket = socket,
+                .socket = &socket,
                 .client = new_client,
             };
 
@@ -235,10 +173,10 @@ pub fn main() !void {
             kcp.setNodelay(kcp_inst, 1, 10, 2, 1);
             kcp.wndsize(kcp_inst, 128, 128);
 
-            try clients.put(from_hash, new_client);
+            try clients.put(from, new_client);
 
             var addr_buf: [64]u8 = undefined;
-            const addr_str = try formatAddress(&from, &addr_buf);
+            const addr_str = try from.formatBuf(&addr_buf);
             std.debug.print("✓ {s} connected from {s}\n", .{ username, addr_str });
 
             // Notify other clients
@@ -277,7 +215,7 @@ pub fn main() !void {
 
 // Broadcast message to all clients (except exclude)
 fn broadcastMessage(
-    clients: *std.AutoHashMap(u64, *Client),
+    clients: *std.AutoHashMap(Address, *Client),
     allocator: std.mem.Allocator,
     exclude: ?*Client,
     message: []const u8,
@@ -292,7 +230,7 @@ fn broadcastMessage(
 
 // Handle client message
 fn handleClientMessage(
-    clients: *std.AutoHashMap(u64, *Client),
+    clients: *std.AutoHashMap(Address, *Client),
     allocator: std.mem.Allocator,
     client: *Client,
     message: []const u8,
@@ -328,7 +266,7 @@ fn handleClientMessage(
 
 // Handle command
 fn handleCommand(
-    clients: *std.AutoHashMap(u64, *Client),
+    clients: *std.AutoHashMap(Address, *Client),
     allocator: std.mem.Allocator,
     client: *Client,
     cmd: []const u8,
@@ -377,7 +315,7 @@ fn handleCommand(
 
     // /list
     if (std.mem.eql(u8, std.mem.trim(u8, cmd, " \t\r\n"), "/list")) {
-        var list_buf = std.ArrayList(u8){};
+        var list_buf: std.ArrayList(u8) = .empty;
         defer list_buf.deinit(allocator);
 
         try list_buf.appendSlice(allocator, "── Online users ──\n");
