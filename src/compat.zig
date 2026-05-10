@@ -79,11 +79,29 @@ pub const Timer = struct {
 };
 
 //---------------------------------------------------------------------
-// Lazy single-threaded Io (0.16 only). Cheap: no syscall on 0.15.
+// Lazy multi-threaded Io (0.16 only).
+//
+// The stdlib's `global_single_threaded` instance disables concurrency, which
+// is fine for clock/sleep but breaks `Socket.receiveTimeout` on Windows: the
+// IOCP backend needs worker threads to drain completions and otherwise fails
+// with `error.ConcurrencyUnavailable`. We init a proper `Threaded` once on
+// first use and reuse it across all calls.
 //---------------------------------------------------------------------
+var io_threaded_storage: if (is_016) std.Io.Threaded else void = undefined;
+var io_init_state: std.atomic.Value(u8) = .init(0); // 0=uninit, 1=initing, 2=ready
+
 fn ioInstance() if (is_016) std.Io else void {
     if (comptime !is_016) return {};
-    return std.Io.Threaded.global_single_threaded.io();
+
+    if (io_init_state.load(.acquire) == 2) return io_threaded_storage.io();
+
+    if (io_init_state.cmpxchgStrong(0, 1, .acquire, .monotonic) == null) {
+        io_threaded_storage = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+        io_init_state.store(2, .release);
+    } else {
+        while (io_init_state.load(.acquire) != 2) std.atomic.spinLoopHint();
+    }
+    return io_threaded_storage.io();
 }
 
 //---------------------------------------------------------------------
@@ -149,7 +167,9 @@ pub const NetError = error{
 pub const Socket = struct {
     impl: Impl,
 
-    const Impl = if (is_016) std.Io.net.Socket else std.posix.fd_t;
+    // socket_t (not fd_t) on 0.15: on Windows the two are different opaque
+    // pointer types (HANDLE vs SOCKET) and POSIX socket fns take socket_t.
+    const Impl = if (is_016) std.Io.net.Socket else std.posix.socket_t;
 
     pub fn close(self: *Socket) void {
         if (comptime is_016) {
